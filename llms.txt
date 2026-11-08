@@ -1,0 +1,12 @@
+# Cadence
+
+> Cadence is a lightweight Spotify desktop client for Windows, written entirely in Rust. Native Slint UI (software renderer, no GPU stack, no webview), streaming via librespot, library browsing via the Spotify Web API (rspotify). ~25 MB RAM while playing with the library open (measured: min 17.4 MB, avg 25.2 MB, max 28.1 MB over 10 min). 320 kbps, gapless playback, loudness normalisation, Spotify Connect device, media keys, synced lyrics.
+
+- Repository: https://github.com/yoshik08/cadence
+- Download: https://github.com/yoshik08/cadence/releases (cadence.exe, ~12 MB, no installer)
+- Requirements: Windows 10/11, Spotify Premium
+- Setup: create a Spotify developer app, add redirect URI http://127.0.0.1:8888/callback, give Cadence the Client ID via SPOTIFY_CLIENT_ID or %APPDATA%\cadence\client_id.txt
+- Login: two one-time browser approvals (Web API, then librespot streaming grant)
+- Build: cargo build --release (Rust edition 2024, VS 2022 Build Tools with C++ workload)
+- Limits: new Spotify apps are capped to 5 users in Development Mode until extended quota is approved; librespot is unofficial and against Spotify's ToS
+- License: MIT
