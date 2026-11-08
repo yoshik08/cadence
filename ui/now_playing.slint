@@ -5,10 +5,28 @@ import { Theme } from "theme.slint";
 import { Cover } from "cover.slint";
 import { ListView } from "std-widgets.slint";
 
+export struct LyricLetter {
+    // One letter of a word, with the position (ms) at which it lights.
+    // Thresholds are precomputed in Rust: letters light progressively through the word window.
+    ch: string,
+    start-ms: int,
+}
+
+export struct LyricWord {
+    letters: [LyricLetter],
+    // Visual row (0 or 1) the word sits on; assigned in Rust from the real window width
+    // so the karaoke line wraps instead of truncating or clipping.
+    row: int,
+}
+
 export struct LyricLine {
     text: string,
     start-ms: int,
     end-ms: int,
+    // Per-word letter timings (yoshik.xyz word mode); empty for line-synced or plain lines.
+    words: [LyricWord],
+    // How many visual rows the word-mode rendering uses (1 or 2).
+    word-rows: int,
 }
 
 export global Playback {
@@ -227,10 +245,10 @@ export component NowPlayingBar inherits Rectangle {
     background: Theme.bg;
 
     Timer {
-        interval: 500ms;
+        interval: 100ms;
         running: Playback.playing && Playback.duration-ms > 0;
         triggered => {
-            Playback.position-ms = Math.min(Playback.position-ms + 500, Playback.duration-ms);
+            Playback.position-ms = Math.min(Playback.position-ms + 100, Playback.duration-ms);
         }
     }
 
@@ -422,18 +440,52 @@ export component NowPlayingBar inherits Rectangle {
     }
 }
 
+// One visual row of the karaoke line: the words assigned to `row`, letters lighting in turn.
+component LyricWordRow inherits HorizontalLayout {
+    in property <[LyricWord]> words;
+    in property <int> row-index;
+    in property <length> font-size;
+    spacing: 0px;
+    for word in root.words : HorizontalLayout {
+        visible: word.row == root.row-index;
+        spacing: 0px;
+        for letter in word.letters : Text {
+            text: letter.ch;
+            color: Playback.position-ms >= letter.start-ms ? #ffffff : #ffffff.mix(transparent, 68%);
+            font-size: root.font-size;
+            letter-spacing: -0.6px;
+            font-weight: Theme.weight-bold;
+        }
+        Text {
+            text: " ";
+            font-size: root.font-size;
+            font-weight: Theme.weight-bold;
+        }
+    }
+}
+
 // One lyric line. `state`: -1 sung, 0 current, 1 coming up, 2 plain (unsynced).
+// Sizing is handed in by LyricsPanel and scales with the window: rows are tall enough
+// for a wrapped two-line lyric, and lines wrap instead of truncating with "...".
 component LyricRow inherits Rectangle {
     in property <LyricLine> line;
     in property <int> state;
     in property <bool> clickable;
+    in property <length> active-size: 42px;
+    in property <length> other-size: 26px;
+    in property <length> row-height: 105px;
     callback clicked;
-    height: 76px;
+    height: root.row-height;
     border-radius: Theme.radius-control;
     background: (root.clickable && touch.has-hover) ? Theme.hover : transparent;
     animate background { duration: Theme.duration-fast; easing: Theme.ease; }
 
+    // Word-by-word karaoke (yoshik.xyz): the active line renders per-letter; letters light
+    // as position-ms passes each letter's threshold (precomputed in Rust).
+    property <bool> word-mode: root.state == 0 && root.line.words.length > 0;
+
     Text {
+        visible: !root.word-mode;
         x: Theme.space-sm;
         y: 0px;
         width: parent.width - 2 * Theme.space-sm;
@@ -441,12 +493,27 @@ component LyricRow inherits Rectangle {
         vertical-alignment: center;
         text: root.line.text;
         wrap: word-wrap;
-        overflow: elide;
-        font-size: root.state == 0 ? 42px : 26px;
+        // Never truncate a lyric line with "...": long lines wrap onto a second line
+        // and the row is sized for two lines, so nothing is clipped.
+        font-size: root.state == 0 ? root.active-size : root.other-size;
         letter-spacing: root.state == 0 ? -0.6px : -0.3px;
         font-weight: Theme.weight-bold;
         color: root.state == 0 ? #ffffff : root.state < 0 ? #ffffff.mix(transparent, 55%) : root.state == 1 ? #ffffff.mix(transparent, 68%) : #ffffff;
         animate font-size, color { duration: Theme.duration-fast; easing: Theme.ease; }
+    }
+
+    // Word flow for the active line: letters light one by one, words wrap like the plain text.
+    // Words are pre-split into at most two visual rows in Rust (build_lyric_words) from the
+    // real window width, so a long line wraps instead of truncating or clipping.
+    // Two rows fill the row (2.5x the active font); a single row is vertically centered.
+    VerticalLayout {
+        visible: root.word-mode;
+        x: Theme.space-sm;
+        y: (parent.height - root.line.word-rows * root.active-size * 1.25) / 2;
+        width: parent.width - 2 * Theme.space-sm;
+        spacing: 0px;
+        LyricWordRow { words: root.line.words; row-index: 0; font-size: root.active-size; }
+        LyricWordRow { words: root.line.words; row-index: 1; font-size: root.active-size; visible: root.line.word-rows > 1; }
     }
     touch := TouchArea {
         enabled: root.clickable && root.line.text != "";
@@ -456,14 +523,20 @@ component LyricRow inherits Rectangle {
 }
 
 // Synced lyrics follow `position-ms`: the current line is vertically centered at the screen midpoint.
-// A manual scroll pauses auto-follow for 3 s.
+// A manual scroll pauses auto-follow for 4 s.
 component LyricsPanel inherits Rectangle {
     property <int> n: Playback.lyrics.length;
     property <int> pos: Playback.position-ms;
     property <bool> synced: Playback.lyrics-synced;
     property <string> track: Playback.title;
     property <length> vh: list.visible-height;
-    property <length> row-h: 76px;
+    // Type scales with the panel width so fullscreen and windowed both fit: full 42px
+    // at wide sizes, shrinking to 65% at narrow ones. Row height is 2.5x the active
+    // font size, so a line that wraps onto two lines still fits inside its row.
+    property <float> scale: Math.clamp(root.width / 900px, 0.65, 1.0);
+    property <length> active-size: 42px * root.scale;
+    property <length> other-size: 26px * root.scale;
+    property <length> row-h: root.active-size * 2.5;
     property <int> active: -1;
     property <int> probe: -1;
     property <bool> paused;
@@ -504,6 +577,9 @@ component LyricsPanel inherits Rectangle {
     }
     changed active => { root.follow(); }
     changed vh => { root.follow(); }
+    // Resize / fullscreen toggle changes row-h (type scales with width): re-center so the
+    // active line never sits at a stale offset or clipped against the viewport edge.
+    changed row-h => { root.follow(); }
     changed track => { root.restart(); }
     changed n => { root.restart(); }
     function restart() {
@@ -534,10 +610,13 @@ component LyricsPanel inherits Rectangle {
         animate content-y { duration: Theme.duration-normal; easing: Theme.ease; }
         scrolled => {
             root.paused = true;
-            root.resume-at = animation-tick() + 3s;
+            root.resume-at = animation-tick() + 4s;
         }
         for line[i] in Playback.lyrics : LyricRow {
             line: line;
+            active-size: root.active-size;
+            other-size: root.other-size;
+            row-height: root.row-h;
             state: !root.synced ? 2 : i < root.active ? -1 : i == root.active ? 0 : 1;
             clickable: root.synced;
             clicked => {

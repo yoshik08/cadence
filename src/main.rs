@@ -117,6 +117,131 @@ fn describe(ev: &Event) -> String {
     }
 }
 
+/// Last fetched lyrics + track duration, so a window resize can re-split the word-mode
+/// rows for the new width without re-fetching. UI thread only.
+thread_local! {
+    static LAST_LYRICS: RefCell<Option<(player::Lyrics, u32)>> = const { RefCell::new(None) };
+}
+
+/// Max chars on one karaoke row for the current window, mirroring the NowPlayingView
+/// geometry in ui/now_playing.slint (side column + gaps) and the LyricsPanel scale, so a
+/// word-mode row never overflows the lyrics column at any window size.
+fn lyric_row_budget(ui: &MainWindow) -> usize {
+    let scale = ui.window().scale_factor();
+    let w = ui.window().size().width as f32 / scale;
+    let side_w = (w * 0.36).clamp(260.0, 520.0);
+    let side_x = 36.0f32.max(w * 0.06);
+    let gap = 36.0f32.max(w * 0.05);
+    let panel_w = w - side_x - side_w - gap - side_x;
+    let font = 42.0 * (panel_w / 900.0).clamp(0.65, 1.0);
+    let text_w = (panel_w - 16.0).max(0.0); // two space-sm (8px) insets
+    // Bold lyrics average ~0.5em per glyph; 0.58em leaves room for wide words.
+    ((text_w / (0.58 * font)).floor() as usize).clamp(12, 60)
+}
+
+/// Build the per-word letter models for the karaoke line, assigning each word to visual
+/// row 0 or 1 so the line wraps instead of truncating. `budget` is the max chars on one
+/// row for the current window (see lyric_row_budget). Returns an empty model (and 1 row)
+/// when the line has no word timings or cannot fit on two rows; the UI then falls back
+/// to the plain wrapping Text for that line.
+fn build_lyric_words(
+    line: &player::LyricLine,
+    budget: usize,
+) -> (slint::ModelRc<slint::VecModel<LyricWord>>, i32) {
+    let empty = || (std::rc::Rc::new(slint::VecModel::default()).into(), 1);
+    let text_words: Vec<&str> = line.text.split_whitespace().collect();
+    if line.words.len() != text_words.len() || line.words.is_empty() {
+        return empty();
+    }
+    // Greedy word wrap: a word moves to row 1 once it no longer fits on row 0; the line
+    // falls back to plain text if it needs a third row or one word alone is too wide.
+    let mut rows: Vec<i32> = Vec::with_capacity(text_words.len());
+    let mut row = 0;
+    let mut used = 0usize;
+    for w in &text_words {
+        let len = w.chars().count();
+        if len > budget {
+            return empty();
+        }
+        if used > 0 && used + 1 + len > budget {
+            if row == 0 {
+                row = 1;
+                used = 0;
+            } else {
+                return empty();
+            }
+        }
+        rows.push(row);
+        used += len + usize::from(used > 0);
+    }
+    let word_rows = if row == 1 { 2 } else { 1 };
+    let words = text_words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let s = line.words[i];
+            let e = line.ends.get(i).copied().unwrap_or(s + 300);
+            let chars: Vec<char> = w.chars().collect();
+            let n = chars.len();
+            let letters = chars
+                .iter()
+                .enumerate()
+                .map(|(ci, ch)| {
+                    let frac = if n <= 1 { 1.0 } else { ci as f32 / (n - 1) as f32 };
+                    let start = s + ((e.saturating_sub(s)) as f32 * frac * 0.7) as u32;
+                    LyricLetter {
+                        ch: ch.to_string().into(),
+                        start_ms: start as i32,
+                    }
+                })
+                .collect::<Vec<_>>();
+            LyricWord {
+                letters: std::rc::Rc::new(slint::VecModel::from(letters)).into(),
+                row: rows[i],
+            }
+        })
+        .collect::<Vec<_>>();
+    (std::rc::Rc::new(slint::VecModel::from(words)).into(), word_rows)
+}
+
+/// Map fetched lyrics to Slint models, splitting word-mode rows for the current width.
+fn lyric_models(lyrics: &player::Lyrics, duration_ms: u32, budget: usize) -> Vec<LyricLine> {
+    let mut lines = Vec::with_capacity(lyrics.lines.len());
+    for (i, line) in lyrics.lines.iter().enumerate() {
+        let end = if i + 1 < lyrics.lines.len() {
+            lyrics.lines[i + 1].start_ms
+        } else {
+            duration_ms.max(line.start_ms)
+        };
+        let (words, word_rows) = build_lyric_words(line, budget);
+        lines.push(LyricLine {
+            text: line.text.clone().into(),
+            start_ms: line.start_ms as i32,
+            end_ms: end as i32,
+            words,
+            word_rows,
+        });
+    }
+    lines
+}
+
+/// Rebuild the lyric models from the last fetched lyrics, re-splitting word-mode rows
+/// for the current window width. No-op when no lyrics are loaded.
+fn rebuild_lyrics(ui: &MainWindow) {
+    LAST_LYRICS.with(|cell| {
+        let guard = cell.borrow();
+        let Some((lyrics, duration_ms)) = guard.as_ref() else {
+            return;
+        };
+        let budget = lyric_row_budget(ui);
+        let lines = lyric_models(lyrics, *duration_ms, budget);
+        let pb = ui.global::<Playback>();
+        pb.set_lyrics_synced(lyrics.synced);
+        pb.set_lyrics_note(slint::SharedString::default());
+        pb.set_lyrics(std::rc::Rc::new(slint::VecModel::from(lines)).into());
+    });
+}
+
 /// UI thread: show the new track and kick off its art and lyrics.
 fn apply_track(
     ui: &MainWindow,
@@ -138,6 +263,9 @@ fn apply_track(
     pb.set_lyrics(std::rc::Rc::new(slint::VecModel::default()).into());
     pb.set_lyrics_synced(false);
     pb.set_lyrics_note("Loading lyrics…".into());
+    // Drop the previous track's lyrics so a resize before the fetch lands cannot
+    // resurrect them.
+    LAST_LYRICS.with(|cell| *cell.borrow_mut() = None);
     ui.global::<Browse>().set_current_uri(uri.clone().into());
 
     // Kick off lyrics fetch (Spotify color-lyrics first, fallback to LRCLIB)
@@ -167,24 +295,11 @@ fn apply_track(
             let pb = ui.global::<Playback>();
             match lyrics {
                 Some(l) if !l.lines.is_empty() => {
-                    let mut lines = Vec::with_capacity(l.lines.len());
-                    for (i, (start, text)) in l.lines.iter().enumerate() {
-                        let end = if i + 1 < l.lines.len() {
-                            l.lines[i + 1].0
-                        } else {
-                            duration_ms.max(*start)
-                        };
-                        lines.push(LyricLine {
-                            text: text.clone().into(),
-                            start_ms: *start as i32,
-                            end_ms: end as i32,
-                        });
-                    }
-                    pb.set_lyrics_synced(l.synced);
-                    pb.set_lyrics_note(slint::SharedString::default());
-                    pb.set_lyrics(std::rc::Rc::new(slint::VecModel::from(lines)).into());
+                    LAST_LYRICS.with(|cell| *cell.borrow_mut() = Some((l, duration_ms)));
+                    rebuild_lyrics(&ui);
                 }
                 _ => {
+                    LAST_LYRICS.with(|cell| *cell.borrow_mut() = None);
                     pb.set_lyrics(std::rc::Rc::new(slint::VecModel::default()).into());
                     pb.set_lyrics_synced(false);
                     pb.set_lyrics_note("No lyrics available for this track.".into());
@@ -373,6 +488,13 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let ui = MainWindow::new()?;
     ui.on_play_pause_key(|| with_player(|p| p.play_pause()));
+    // Resize / fullscreen toggle: re-split the karaoke word-rows for the new width.
+    let weak_lyrics = ui.as_weak();
+    ui.on_relayout_lyrics(move || {
+        if let Some(ui) = weak_lyrics.upgrade() {
+            rebuild_lyrics(&ui);
+        }
+    });
 
     let pb = ui.global::<Playback>();
     pb.on_play_pause(|| with_player(|p| p.play_pause()));

@@ -227,18 +227,35 @@ impl Player {
     }
 }
 
+pub struct LyricLine {
+    pub start_ms: u32,
+    pub text: String,
+    /// Per-word start times (ms), aligned 1:1 with `text` split on whitespace; empty if unknown.
+    pub words: Vec<u32>,
+    /// Per-word end times (ms), same alignment as `words`.
+    pub ends: Vec<u32>,
+}
+
 pub struct Lyrics {
     pub synced: bool,
-    pub lines: Vec<(u32 /*start ms*/, String)>,
+    /// True when at least one line carries per-word timings.
+    pub word_sync: bool,
+    pub lines: Vec<LyricLine>,
 }
 
 impl Player {
-    /// Exact lyrics pipeline matching yoshik.xyz / lyrics:
-    /// 1. Spotify internal color-lyrics via librespot session
-    /// 2. Clean title: remove (feat. ...), [feat. ...], (with ...), remasters, bonus tracks, suffixes
-    /// 3. LRCMUX API (https://api.lrcmux.dev/get with User-Agent: yoshik.xyz/lyrics)
-    /// 4. LRCLIB API (get + search fallback)
-    /// 5. Retry with raw title if different
+    /// Lyrics pipeline ported from yoshik.xyz/api/lyrics.js (its line and word modes combined):
+    /// 1. Spotify internal color-lyrics via the librespot session. The site has no equivalent;
+    ///    it is kept because it is the most accurate source and is not sync logic.
+    /// 2. Word race: LRCMUX word-level + NetEase YRC, queried in parallel; first result with
+    ///    per-word timings wins.
+    /// 3. Line race: LRCMUX -> LRCLIB -> NetEase LRC, queried in parallel; first valid wins,
+    ///    LRCLIB plain lyrics last.
+    /// 4. Retry with the raw title when the cleaned title differs.
+    /// 5. Fallback: unsynced Spotify lyrics if any.
+    /// No syncing anywhere: no calibrate(), no offset estimation, no confidence/MAD candidate
+    /// selection. Provider timings are used exactly as returned — Cadence playback is local and
+    /// the librespot position is exact, so there is nothing to correct for.
     pub async fn lyrics(
         &self,
         uri: &str,
@@ -256,26 +273,19 @@ impl Player {
 
         let cleaned = clean_title(title);
 
-        // 2. LRCMUX with cleaned title (primary yoshik.xyz lyrics provider)
-        if let Some(l) = lrcmux(&cleaned, artist, duration_ms).await {
-            return Some(l);
-        }
-
-        // 3. LRCLIB with cleaned title
-        if let Some(l) = lrclib(&cleaned, artist, album, duration_ms).await {
-            if l.synced {
+        // 2. Word race, then 3. line race — cleaned title first, raw title as retry.
+        let mut query = cleaned.as_str();
+        loop {
+            if let Some(l) = fetch_word(query, artist, duration_ms).await {
                 return Some(l);
             }
-        }
-
-        // 4. Retry with raw title if different
-        if cleaned != title {
-            if let Some(l) = lrcmux(title, artist, duration_ms).await {
+            if let Some(l) = fetch_line(query, artist, album, duration_ms).await {
                 return Some(l);
             }
-            if let Some(l) = lrclib(title, artist, album, duration_ms).await {
-                return Some(l);
+            if query == title {
+                break;
             }
+            query = title;
         }
 
         // Fallback: unsynced Spotify lyrics if any
@@ -308,38 +318,138 @@ fn http() -> &'static reqwest::Client {
     })
 }
 
-/// Clean track titles matching cleanTitle() in yoshik.xyz/lyrics/api/lyrics.js
+/// Word race: LRCMUX word-level + NetEase YRC in parallel; first with per-word timings wins.
+/// No calibration: provider timings are used exactly as returned.
+async fn fetch_word(title: &str, artist: &str, duration_ms: u32) -> Option<Lyrics> {
+    let (a, b) = tokio::join!(
+        lrcmux(title, artist, duration_ms, true),
+        netease(title, artist, duration_ms)
+    );
+    if let Some(l) = a.filter(|l| l.word_sync) {
+        return Some(l);
+    }
+    if let Some(l) = b.filter(|l| l.word_sync) {
+        return Some(l);
+    }
+    None
+}
+
+/// Line race: LRCMUX -> LRCLIB -> NetEase LRC in parallel; first valid wins, LRCLIB plain last.
+async fn fetch_line(
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration_ms: u32,
+) -> Option<Lyrics> {
+    let (a, b, c) = tokio::join!(
+        lrcmux(title, artist, duration_ms, false),
+        lrclib(title, artist, album, duration_ms),
+        netease(title, artist, duration_ms)
+    );
+    if let Some(l) = a {
+        return Some(l);
+    }
+    let plain = match b {
+        Some(l) if l.synced => return Some(l),
+        other => other,
+    };
+    if let Some(l) = c {
+        return Some(l);
+    }
+    plain
+}
+
+/// Last line must start within the track (+2 s) or the result is a wrong-track match.
+fn length_ok(lines: &[LyricLine], duration_ms: u32) -> bool {
+    duration_ms == 0
+        || lines
+            .last()
+            .map(|l| l.start_ms)
+            .unwrap_or(0)
+            <= duration_ms + 2000
+}
+
+/// Port of norm() in yoshik.xyz/api/lyrics.js: lowercase, strip diacritics, dashes to spaces,
+/// drop punctuation, collapse whitespace. Used only for match verification, never for timing.
+fn norm(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = true;
+    for ch in s.chars() {
+        if ('\u{0300}'..='\u{036f}').contains(&ch) {
+            continue;
+        }
+        let base = strip_diacritic(ch);
+        let lower = base.to_lowercase().next().unwrap_or(base);
+        if lower == '-' || lower == '_' || lower == '–' || lower == '—' || lower == '/' {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else if lower.is_alphanumeric() || lower == ' ' {
+            if lower == ' ' {
+                if !prev_space {
+                    out.push(' ');
+                    prev_space = true;
+                }
+            } else {
+                out.push(lower);
+                prev_space = false;
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// Precomposed Latin-1 accented letters to their base letter (NFD decomposition, std-only).
+fn strip_diacritic(ch: char) -> char {
+    match ch {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+        'è' | 'é' | 'ê' | 'ë' => 'e',
+        'ì' | 'í' | 'î' | 'ï' => 'i',
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' => 'o',
+        'ù' | 'ú' | 'û' | 'ü' => 'u',
+        'ý' | 'ÿ' => 'y',
+        'ñ' => 'n',
+        'ç' => 'c',
+        'ø' => 'o',
+        _ => ch,
+    }
+}
+
+/// Port of firstSigWord() in yoshik.xyz/api/lyrics.js: first word that is not the/a/an.
+fn first_sig_word(s: &str) -> String {
+    let words: Vec<&str> = norm(s).split_whitespace().collect();
+    for w in &words {
+        if !matches!(*w, "the" | "a" | "an") {
+            return w.to_string();
+        }
+    }
+    words.first().map(|w| w.to_string()).unwrap_or_default()
+}
+
+/// Port of cleanTitle() in yoshik.xyz/api/lyrics.js.
 fn clean_title(raw: &str) -> String {
     let mut s = raw.to_string();
     loop {
         let prev = s.clone();
-        // Strip trailing brackets containing feat/ft/with/bonus/remaster
-        if let Some(start) = s.rfind(|c| c == '(' || c == '[') {
-            let close = if s.as_bytes()[start] == b'(' { ')' } else { ']' };
-            if let Some(end) = s[start..].find(close) {
-                let inner = s[start + 1..start + end].trim().to_lowercase();
-                if inner.starts_with("feat")
-                    || inner.starts_with("ft.")
-                    || inner.starts_with("ft ")
-                    || inner.starts_with("featuring")
-                    || inner.starts_with("with ")
-                    || inner.contains("remaster")
-                    || inner.contains("bonus")
-                {
-                    s = format!("{}{}", s[..start].trim_end(), &s[start + end + 1..]);
-                }
-            }
-        }
-        // Strip trailing "- bonus", "- remaster...", "- radio edit", "- single version", etc.
+        // Strip any bracket group whose contents start with feat/ft/featuring/with,
+        // or mention bonus/remaster.
+        s = strip_bracket_group(&s);
+        // Strip a trailing " - <suffix>" where the suffix is a bonus/remaster/radio/single/explicit tag.
         if let Some(idx) = s.rfind(" - ") {
             let suffix = s[idx + 3..].trim().to_lowercase();
-            if suffix.contains("remaster")
-                || suffix.starts_with("bonus")
+            let mut parts = suffix.splitn(2, ' ');
+            let year_remaster = matches!(parts.next(), Some(y) if y.len() == 4 && y.chars().all(|c| c.is_ascii_digit()))
+                && parts.next().map(|r| r.contains("remaster")).unwrap_or(false);
+            let is_tag = suffix.starts_with("bonus")
+                || suffix.contains("remaster")
                 || suffix.starts_with("radio edit")
+                || suffix.starts_with("radio version")
                 || suffix.starts_with("single version")
                 || suffix.starts_with("single edit")
                 || suffix.starts_with("explicit")
-            {
+                || year_remaster;
+            if is_tag {
                 s.truncate(idx);
             }
         }
@@ -355,8 +465,40 @@ fn clean_title(raw: &str) -> String {
     }
 }
 
-/// Query LRCMUX (https://api.lrcmux.dev/get) - the exact provider from yoshik.xyz/lyrics
-async fn lrcmux(title: &str, artist: &str, duration_ms: u32) -> Option<Lyrics> {
+/// Remove the first bracket group (parens or square) whose inner text starts with
+/// feat/ft/featuring/with or mentions bonus/remaster; returns the string unchanged if none.
+fn strip_bracket_group(s: &str) -> String {
+    for (i, ch) in s.char_indices() {
+        let close = match ch {
+            '(' => ')',
+            '[' => ']',
+            _ => continue,
+        };
+        let rest = &s[i + ch.len_utf8()..];
+        if let Some(rel) = rest.find(close) {
+            let inner = rest[..rel].trim().to_lowercase();
+            let hit = inner.starts_with("feat")
+                || inner.starts_with("ft.")
+                || inner.starts_with("ft ")
+                || inner.starts_with("featuring")
+                || inner.starts_with("with ")
+                || inner.contains("remaster")
+                || inner.starts_with("bonus");
+            if hit {
+                let mut out = String::with_capacity(s.len());
+                out.push_str(s[..i].trim_end());
+                out.push_str(&rest[rel + close.len_utf8()..]);
+                return out;
+            }
+        }
+    }
+    s.to_string()
+}
+
+/// Query LRCMUX (https://api.lrcmux.dev/get) - the provider from yoshik.xyz/lyrics.
+/// `word` requests word-level timings. Applies the site's Fix B (match verification:
+/// artist fuzzy match + first significant word) and Fix C (length sanity check).
+async fn lrcmux(title: &str, artist: &str, duration_ms: u32, word: bool) -> Option<Lyrics> {
     let primary_artist = artist.split(',').next().unwrap_or(artist).trim();
     let secs = (duration_ms as f64 / 1000.0).round() as u64;
     let secs_s = secs.to_string();
@@ -367,7 +509,7 @@ async fn lrcmux(title: &str, artist: &str, duration_ms: u32) -> Option<Lyrics> {
             ("artist", primary_artist),
             ("title", title),
             ("duration", secs_s.as_str()),
-            ("level", "line"),
+            ("level", if word { "word" } else { "line" }),
             ("sources", "!kugou"),
         ])
         .timeout(Duration::from_secs(4))
@@ -379,22 +521,388 @@ async fn lrcmux(title: &str, artist: &str, duration_ms: u32) -> Option<Lyrics> {
     }
     let body = r.text().await.ok()?;
     let v: Value = serde_json::from_str(&body).ok()?;
+    let track = v.get("track")?;
+    let meta = v.get("meta")?;
+    let _ = meta;
     let lines_arr = v.get("lines")?.as_array()?;
     if lines_arr.is_empty() {
         return None;
     }
-    let mut lines = Vec::with_capacity(lines_arr.len());
-    for item in lines_arr {
-        let text = item.get("text").and_then(Value::as_str).unwrap_or("").trim();
-        let start = item.get("start").and_then(Value::as_u64).unwrap_or(0) as u32;
-        push_line(&mut lines, start, text);
+
+    // Fix B: verify match.
+    let req_artist = norm(primary_artist);
+    let track_artist = norm(track.get("artist").and_then(Value::as_str).unwrap_or(""));
+    if req_artist.is_empty() || track_artist.is_empty() {
+        return None;
     }
-    (!lines.is_empty()).then_some(Lyrics {
+    if !track_artist.contains(&req_artist) && !req_artist.contains(&track_artist) {
+        return None;
+    }
+    let sig_req = first_sig_word(title);
+    let sig_track = first_sig_word(track.get("title").and_then(Value::as_str).unwrap_or(""));
+    if sig_req.is_empty() || sig_track.is_empty() || sig_req != sig_track {
+        return None;
+    }
+
+    let mut lines = Vec::with_capacity(lines_arr.len());
+    let mut word_sync = false;
+    for item in lines_arr {
+        let text = item
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let start = item.get("start").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let (words, ends) = match item.get("words").and_then(Value::as_array) {
+            Some(arr) => {
+                let provider_words: Vec<(String, u32, u32)> = arr
+                    .iter()
+                    .filter_map(|w| {
+                        Some((
+                            w.get("text")?.as_str()?.to_string(),
+                            w.get("start")?.as_u64()? as u32,
+                            w.get("end")?.as_u64()? as u32,
+                        ))
+                    })
+                    .collect();
+                align_word_count(text, &provider_words)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        if !words.is_empty() {
+            word_sync = true;
+        }
+        push_word_line(&mut lines, start, text, words, ends);
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    // Fix C: length sanity check.
+    if !length_ok(&lines, duration_ms) {
+        return None;
+    }
+    Some(Lyrics {
         synced: true,
+        word_sync,
         lines,
     })
 }
 
+const NETEASE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/// Port of fetchNetease() in yoshik.xyz/api/lyrics.js: search, best match by fuzzy
+/// title/artist + closest duration (<= 3000 ms), then YRC word lyrics, else LRC lines.
+async fn netease(title: &str, artist: &str, duration_ms: u32) -> Option<Lyrics> {
+    let primary_artist = artist.split(',').next().unwrap_or(artist).trim();
+    let clean_t = title.replace('\'', "'");
+    let q = format!("{} {}", clean_t, primary_artist);
+    let sr = http()
+        .get("https://music.163.com/api/cloudsearch/pc")
+        .header("User-Agent", NETEASE_UA)
+        .header("Referer", "https://music.163.com")
+        .query(&[("s", q.as_str()), ("type", "1"), ("limit", "10")])
+        .timeout(Duration::from_secs(4))
+        .send()
+        .await
+        .ok()?;
+    if !sr.status().is_success() {
+        return None;
+    }
+    let sd: Value = serde_json::from_str(&sr.text().await.ok()?).ok()?;
+    let songs = sd.get("result")?.get("songs")?.as_array()?;
+    if songs.is_empty() {
+        return None;
+    }
+
+    let title_n = norm(&clean_t);
+    let artist_n = norm(primary_artist);
+    let mut best_id: Option<u64> = None;
+    let mut best_score = u64::MAX;
+    for s in songs {
+        let s_title = norm(s.get("name").and_then(Value::as_str).unwrap_or(""));
+        let s_artist = norm(
+            s.get("ar")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(|a| a.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        );
+        if s_title.is_empty() || s_artist.is_empty() {
+            continue;
+        }
+        // Title and artist must fuzzy match.
+        if !s_title.contains(&title_n) && !title_n.contains(&s_title) {
+            continue;
+        }
+        if !s_artist.contains(&artist_n) && !artist_n.contains(&s_artist) {
+            continue;
+        }
+        let s_dur = s
+            .get("dt")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| s.get("duration").and_then(Value::as_u64).unwrap_or(0));
+        let score = if duration_ms > 0 {
+            (s_dur as i64 - duration_ms as i64).unsigned_abs()
+        } else {
+            0
+        };
+        if score < best_score {
+            best_score = score;
+            best_id = s.get("id").and_then(Value::as_u64);
+        }
+    }
+    let best_id = best_id?;
+    if duration_ms > 0 && best_score > 3000 {
+        return None;
+    }
+
+    let lr = http()
+        .get("https://music.163.com/api/song/lyric")
+        .header("User-Agent", NETEASE_UA)
+        .header("Referer", "https://music.163.com")
+        .query(&[
+            ("id", best_id.to_string().as_str()),
+            ("lv", "-1"),
+            ("kv", "-1"),
+            ("tv", "-1"),
+            ("yv", "-1"),
+        ])
+        .timeout(Duration::from_secs(4))
+        .send()
+        .await
+        .ok()?;
+    if !lr.status().is_success() {
+        return None;
+    }
+    let ld: Value = serde_json::from_str(&lr.text().await.ok()?).ok()?;
+
+    // Word-level: YRC.
+    if let Some(yrc) = ld
+        .get("yrc")
+        .and_then(|y| y.get("lyric"))
+        .and_then(Value::as_str)
+    {
+        let lines = parse_yrc(yrc);
+        if !lines.is_empty() && length_ok(&lines, duration_ms) {
+            let word_sync = lines.iter().any(|l| !l.words.is_empty());
+            return Some(Lyrics {
+                synced: true,
+                word_sync,
+                lines,
+            });
+        }
+    }
+    // Line-level fallback: LRC.
+    if let Some(lrc) = ld
+        .get("lrc")
+        .and_then(|y| y.get("lyric"))
+        .and_then(Value::as_str)
+    {
+        let lines = parse_lrc(lrc);
+        if !lines.is_empty() && length_ok(&lines, duration_ms) {
+            return Some(Lyrics {
+                synced: true,
+                word_sync: false,
+                lines,
+            });
+        }
+    }
+    None
+}
+
+/// Port of alignWordCount() in yoshik.xyz/api/_karaoke-calib.js.
+/// Parsing helper only: it aligns provider word timings to the line's words; it never shifts times.
+fn align_word_count(
+    text: &str,
+    provider_words: &[(String, u32, u32)],
+) -> (Vec<u32>, Vec<u32>) {
+    let empty = (Vec::new(), Vec::new());
+    let text_words: Vec<&str> = text.split_whitespace().collect();
+    if text_words.is_empty() || provider_words.is_empty() {
+        return empty;
+    }
+    // Drop empty / punctuation-only tokens.
+    let filtered: Vec<(String, u32, u32)> = provider_words
+        .iter()
+        .filter(|(t, _, _)| !t.is_empty() && t.chars().any(|c| c.is_alphanumeric()))
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        return empty;
+    }
+    if filtered.len() == text_words.len() {
+        return (
+            filtered.iter().map(|w| w.1).collect(),
+            filtered.iter().map(|w| w.2).collect(),
+        );
+    }
+    // Try merging: when consecutive tokens should be part of the same word
+    // (e.g. "don" + "'t" -> "don't"), merge into the previous one.
+    let mut merged: Vec<(String, u32, u32)> = vec![filtered[0].clone()];
+    for cur in &filtered[1..] {
+        let target_idx = merged.len() - 1;
+        let merged_text = format!("{}{}", merged[target_idx].0, cur.0);
+        if target_idx < text_words.len()
+            && norm(&merged_text) == norm(text_words[target_idx])
+        {
+            merged[target_idx].0 = merged_text;
+            merged[target_idx].2 = cur.2;
+        } else {
+            merged.push(cur.clone());
+        }
+    }
+    if merged.len() == text_words.len() {
+        return (
+            merged.iter().map(|w| w.1).collect(),
+            merged.iter().map(|w| w.2).collect(),
+        );
+    }
+    empty
+}
+
+/// Port of yrcEnds() in yoshik.xyz/api/_karaoke-calib.js: end = start + dur per chunk.
+fn yrc_ends(chunks: &[(u32, u32, String)]) -> Vec<u32> {
+    chunks.iter().map(|c| c.0 + c.1).collect()
+}
+
+fn is_credit_line(text: &str) -> bool {
+    if text.starts_with('{') || text.starts_with('（') {
+        return true;
+    }
+    const PREFIXES: &[&str] = &[
+        "制作", "作词", "作曲", "编曲", "混音", "母带", "录音", "和声", "出品", "监制",
+    ];
+    if PREFIXES.iter().any(|p| text.starts_with(p)) {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    ["produced", "written", "composed", "arranged"]
+        .iter()
+        .any(|p| lower.starts_with(p))
+}
+
+/// Port of parseYRC() in yoshik.xyz/api/lyrics.js.
+/// Lines: `[lineStart,lineDur](chunkStart,chunkDur,0)text...`
+/// Syllable chunks without spaces merge into one word; uses the first chunk's start.
+fn parse_yrc(yrc: &str) -> Vec<LyricLine> {
+    let mut lines = Vec::new();
+    for raw in yrc.lines() {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let Some(rest) = raw.strip_prefix('[') else {
+            continue;
+        };
+        let Some((hdr, after_hdr)) = rest.split_once(']') else {
+            continue;
+        };
+        let mut hp = hdr.split(',');
+        let line_start: u32 = match hp.next().and_then(|x| x.parse().ok()) {
+            Some(v) => v,
+            None => continue,
+        };
+        // Chunks: (start,dur,0)text
+        let mut chunks: Vec<(u32, u32, String)> = Vec::new();
+        let mut s = after_hdr;
+        while let Some(open) = s.find('(') {
+            let s2 = &s[open + 1..];
+            let Some((nums, after)) = s2.split_once(')') else {
+                break;
+            };
+            let mut np = nums.split(',');
+            let (Some(cs), Some(cd)) = (
+                np.next().and_then(|x| x.parse::<u32>().ok()),
+                np.next().and_then(|x| x.parse::<u32>().ok()),
+            ) else {
+                break;
+            };
+            let text_end = after.find('(').unwrap_or(after.len());
+            let text = &after[..text_end];
+            if !text.is_empty() {
+                chunks.push((cs, cd, text.to_string()));
+            }
+            s = &after[text_end..];
+        }
+        if chunks.is_empty() {
+            continue;
+        }
+        let full_text: String = chunks
+            .iter()
+            .map(|c| c.2.clone())
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if full_text.is_empty() || is_credit_line(&full_text) {
+            continue;
+        }
+        let ends = yrc_ends(&chunks);
+        // Merge chunks into words at whitespace boundaries.
+        let mut words: Vec<(String, u32, u32)> = Vec::new();
+        let mut cur = (chunks[0].2.clone(), chunks[0].0, ends[0]);
+        for (i, ch) in chunks.iter().enumerate().skip(1) {
+            if cur.0.ends_with(' ') || ch.2.starts_with(' ') {
+                words.push((cur.0.trim().to_string(), cur.1, cur.2));
+                cur = (ch.2.trim_start().to_string(), ch.0, ends[i]);
+            } else {
+                cur.0.push_str(&ch.2);
+                cur.2 = ends[i];
+            }
+        }
+        if !cur.0.trim().is_empty() {
+            words.push((cur.0.trim().to_string(), cur.1, cur.2));
+        }
+        let words: Vec<(String, u32, u32)> =
+            words.into_iter().filter(|w| !w.0.is_empty()).collect();
+        if words.is_empty() {
+            continue;
+        }
+        let text = words
+            .iter()
+            .map(|w| w.0.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text_words: Vec<&str> = text.split_whitespace().collect();
+        let mut starts: Vec<u32> = words.iter().map(|w| w.1).collect();
+        let mut ends_out: Vec<u32> = words.iter().map(|w| w.2).collect();
+        for i in 0..ends_out.len() {
+            if ends_out[i] <= starts[i] {
+                ends_out[i] = if i + 1 < ends_out.len() {
+                    starts[i + 1]
+                } else {
+                    starts[i] + 300
+                };
+            }
+        }
+        let (w, e) = if starts.len() == text_words.len() {
+            (starts, ends_out)
+        } else {
+            (vec![], vec![])
+        };
+        lines.push(LyricLine {
+            start_ms: line_start,
+            text,
+            words: w,
+            ends: e,
+        });
+    }
+    lines
+}
+
+const LRCLIB_EXCLUDE: &[&str] = &[
+    "music video",
+    "japanese",
+    "jp ver",
+    "remix",
+    "live",
+    "instrumental",
+    "acoustic",
+];
+
+/// LRCLIB, ported from fetchLrclib() in yoshik.xyz/api/lyrics.js: exact `/api/get` first,
+/// then `/api/search` with the exclude-keyword filter (Fix D) and duration within 3 s.
+/// Synced lyrics preferred; plain lyrics are the last resort. A 429 just yields nothing.
 async fn lrclib(title: &str, artist: &str, album: &str, duration_ms: u32) -> Option<Lyrics> {
     let primary_artist = artist.split(',').next().unwrap_or(artist).trim();
     let secs = (duration_ms as f64 / 1000.0).round();
@@ -412,6 +920,9 @@ async fn lrclib(title: &str, artist: &str, album: &str, duration_ms: u32) -> Opt
         .send()
         .await
         .ok()?;
+    if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return None;
+    }
     if r.status().is_success() {
         if let Some(res) = lrclib_item(&serde_json::from_str(&r.text().await.ok()?).ok()?) {
             return Some(res);
@@ -426,23 +937,79 @@ async fn lrclib(title: &str, artist: &str, album: &str, duration_ms: u32) -> Opt
         .send()
         .await
         .ok()?;
+    if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return None;
+    }
     if !r.status().is_success() {
         return None;
     }
     let v: Value = serde_json::from_str(&r.text().await.ok()?).ok()?;
-    v.as_array()?
-        .iter()
-        .filter_map(|i| {
-            let diff = (i.get("duration")?.as_f64()? - secs).abs();
-            (diff <= 4.0).then_some(())?;
-            lrclib_item(i).map(|l| (l, diff))
-        })
-        .min_by(|a, b| {
-            (!a.0.synced, a.1)
-                .partial_cmp(&(!b.0.synced, b.1))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(l, _)| l)
+    let req_title_lower = title.to_lowercase();
+    let mut best_synced: Option<(Lyrics, f64)> = None;
+    let mut best_plain: Option<(Lyrics, f64)> = None;
+    for x in v.as_array()? {
+        let t_name = x
+            .get("trackName")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| x.get("name").and_then(Value::as_str).unwrap_or(""))
+            .to_lowercase();
+        // Fix D: skip excluded keywords unless the requested title contains that word.
+        if LRCLIB_EXCLUDE
+            .iter()
+            .any(|kw| t_name.contains(kw) && !req_title_lower.contains(kw))
+        {
+            continue;
+        }
+        let diff = if duration_ms > 0 {
+            (x.get("duration").and_then(Value::as_f64).unwrap_or(0.0) - secs).abs()
+        } else {
+            0.0
+        };
+        if duration_ms > 0 && diff > 3.0 {
+            continue;
+        }
+        if let Some(lrc) = x.get("syncedLyrics").and_then(Value::as_str) {
+            let lines = parse_lrc(lrc);
+            if !lines.is_empty()
+                && length_ok(&lines, duration_ms)
+                && best_synced.as_ref().map(|(_, d)| diff < *d).unwrap_or(true)
+            {
+                best_synced = Some((
+                    Lyrics {
+                        synced: true,
+                        word_sync: false,
+                        lines,
+                    },
+                    diff,
+                ));
+            }
+        }
+        if let Some(plain) = x.get("plainLyrics").and_then(Value::as_str) {
+            if best_plain.as_ref().map(|(_, d)| diff < *d).unwrap_or(true) {
+                let mut lines = Vec::new();
+                for l in plain.lines() {
+                    push_line(&mut lines, 0, l);
+                }
+                if !lines.is_empty() {
+                    best_plain = Some((
+                        Lyrics {
+                            synced: false,
+                            word_sync: false,
+                            lines,
+                        },
+                        diff,
+                    ));
+                }
+            }
+        }
+    }
+    if let Some((l, _)) = best_synced {
+        return Some(l);
+    }
+    if let Some((l, _)) = best_plain {
+        return Some(l);
+    }
+    None
 }
 
 /// One LRCLIB track object: synced lyrics if present, else plain; instrumental gives None.
@@ -453,7 +1020,11 @@ fn lrclib_item(v: &Value) -> Option<Lyrics> {
     if let Some(lrc) = v.get("syncedLyrics").and_then(Value::as_str) {
         let lines = parse_lrc(lrc);
         if !lines.is_empty() {
-            return Some(Lyrics { synced: true, lines });
+            return Some(Lyrics {
+                synced: true,
+                word_sync: false,
+                lines,
+            });
         }
     }
     let mut lines = Vec::new();
@@ -462,12 +1033,21 @@ fn lrclib_item(v: &Value) -> Option<Lyrics> {
     }
     (!lines.is_empty()).then_some(Lyrics {
         synced: false,
+        word_sync: false,
         lines,
     })
 }
 
-/// `[mm:ss.xx] text`, several timestamps per line allowed; non-time tags like `[ar:..]` are skipped.
-fn parse_lrc(lrc: &str) -> Vec<(u32, String)> {
+/// `[mm:ss.xx] text`, several timestamps per line allowed; `[offset:...]` shifts all times
+/// (port of parseLRC() in yoshik.xyz/api/lyrics.js). Non-time tags like `[ar:..]` are skipped.
+fn parse_lrc(lrc: &str) -> Vec<LyricLine> {
+    let mut offset: i64 = 0;
+    if let Some(pos) = lrc.find("[offset:") {
+        let rest = &lrc[pos + 8..];
+        if let Some(end) = rest.find(']') {
+            offset = rest[..end].parse().unwrap_or(0);
+        }
+    }
     let mut lines = Vec::new();
     for raw in lrc.lines() {
         let mut rest = raw.trim_start();
@@ -476,15 +1056,17 @@ fn parse_lrc(lrc: &str) -> Vec<(u32, String)> {
             let Some((inner, after)) = tag.split_once(']') else {
                 break;
             };
-            let Some(t) = lrc_time(inner) else { break };
-            times.push(t);
+            let Some(t) = lrc_time(inner) else {
+                break;
+            };
+            times.push((t as i64 - offset).max(0) as u32);
             rest = after;
         }
         for t in times {
             push_line(&mut lines, t, rest);
         }
     }
-    lines.sort_by_key(|l| l.0);
+    lines.sort_by_key(|l| l.start_ms);
     lines
 }
 
@@ -514,15 +1096,24 @@ fn parse_spotify_lyrics(body: &[u8]) -> Option<Lyrics> {
         };
         push_line(&mut lines, start, l.get("words").and_then(Value::as_str).unwrap_or(""));
     }
-    (!lines.is_empty()).then_some(Lyrics { synced, lines })
+    (!lines.is_empty()).then_some(Lyrics {
+        synced,
+        word_sync: false,
+        lines,
+    })
 }
 
-fn push_line(lines: &mut Vec<(u32, String)>, start_ms: u32, text: &str) {
+fn push_line(lines: &mut Vec<LyricLine>, start_ms: u32, text: &str) {
     let text = unescape(text.trim());
     if text.is_empty() {
         if let Some(last) = lines.last() {
-            if !last.1.is_empty() {
-                lines.push((start_ms, String::new()));
+            if !last.text.is_empty() {
+                lines.push(LyricLine {
+                    start_ms,
+                    text: String::new(),
+                    words: Vec::new(),
+                    ends: Vec::new(),
+                });
             }
         }
         return;
@@ -533,7 +1124,36 @@ fn push_line(lines: &mut Vec<(u32, String)>, start_ms: u32, text: &str) {
     for sub in text.split('\n') {
         let sub = sub.trim();
         if !sub.is_empty() && sub != "♪" {
-            lines.push((start_ms, sub.to_string()));
+            lines.push(LyricLine {
+                start_ms,
+                text: sub.to_string(),
+                words: Vec::new(),
+                ends: Vec::new(),
+            });
+        }
+    }
+}
+
+fn push_word_line(
+    lines: &mut Vec<LyricLine>,
+    start_ms: u32,
+    text: &str,
+    words: Vec<u32>,
+    ends: Vec<u32>,
+) {
+    let text = unescape(text.trim());
+    if text.is_empty() || text == "♪" {
+        return;
+    }
+    for sub in text.split('\n') {
+        let sub = sub.trim();
+        if !sub.is_empty() && sub != "♪" {
+            lines.push(LyricLine {
+                start_ms,
+                text: sub.to_string(),
+                words: words.clone(),
+                ends: ends.clone(),
+            });
         }
     }
 }

@@ -16,6 +16,10 @@ export component MainWindow inherits Window {
     background: Theme.bg;
 
     callback play-pause-key();
+    // Window resize / fullscreen toggle: the lyrics word-rows are split for the real
+    // window width, so Rust re-splits them whenever the width changes.
+    callback relayout-lyrics();
+    changed width => { root.relayout-lyrics(); }
 
     // Space and Escape are handled here, so this FocusScope must hold the focus whenever the search
     // field is not in use. A click anywhere else already gives it back; the search field is
