@@ -3,22 +3,19 @@
 //! - Lines are measured with the bundled font's real advances and wrapped here, so every line
 //!   arrives in the UI with its rows, height and offset: the active line can be centred exactly,
 //!   long lines wrap onto more rows and nothing is ever cut with "...".
-//! - The playback clock lives here: position = last librespot position + monotonic time since,
-//!   pushed to the UI by one timer (fast while the lyrics page is open, slow otherwise, off while
-//!   paused). No UI-side counter, so it cannot drift.
-//! - The karaoke stage (karaoke.js) runs here too and writes a fixed set of word slots per frame.
+//! - The playback clock lives here: position = last librespot position + monotonic time since.
+//!   The classic view is updated exactly when the next letter or line is due; the karaoke stage
+//!   (karaoke.js) runs once per rendered frame, paced by the GPU renderer's vsync (frame()), with
+//!   a timer as the fallback on the software renderer. Paused, nothing runs at all.
 //!
 //! UI thread only.
 
 use crate::player::Lyrics;
-use crate::{KWord, LyrLetter, LyrLine, LyrRow, LyrWord, MainWindow, Playback};
+use crate::{KMotion, KWord, LyrLetter, LyrLine, LyrRow, LyrWord, MainWindow, Playback};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-
-/// Bluetooth headphones: show lyrics this much later (script.js HEADPHONES_MS).
-const HEADPHONES_MS: i64 = -225;
 
 // ---------------------------------------------------------------------------------------------
 // Font metrics (ttf-parser, already part of Slint's text stack).
@@ -235,6 +232,8 @@ enum Look {
 
 struct KW {
     text: SharedString,
+    /// Highlight box tilt (deg), karaoke.js --tilt.
+    tilt: f32,
     start: i64,
     end: i64,
     end_eff: i64,
@@ -254,6 +253,92 @@ struct L {
     s: f32,
     o: f32,
     b: f32,
+    /// rotateZ in degrees
+    rz: f32,
+}
+
+/// A karaoke word rasterized once: white glyphs in alpha, sizes in logical px at the base em.
+struct WordTex {
+    img: slint::Image,
+    iw: f32,
+    ih: f32,
+    ix: f32,
+    iy: f32,
+    tw: f32,
+}
+
+static WORD_FONT_DATA: &[u8] = include_bytes!("../assets/fonts/Bricolage-SemiCondensed-800.ttf");
+
+thread_local! {
+    static SCALER: RefCell<swash::scale::ScaleContext> = RefCell::new(swash::scale::ScaleContext::new());
+}
+
+/// Renders `text` at `em` logical px (rasterized at `em * sf` device px, capped so a long word
+/// stays a few MB at most) with letter-spacing -.05em.
+fn rasterize(text: &str, em: f32, sf: f32) -> Option<WordTex> {
+    use swash::scale::{Render, Source};
+    use swash::zeno::{Format, Vector};
+    let font = swash::FontRef::from_index(WORD_FONT_DATA, 0)?;
+    let px = (em * sf).clamp(8.0, 240.0);
+    let k = px / em; // device px per logical px
+    let cmap = font.charmap();
+    let gm = font.glyph_metrics(&[]).scale(px);
+    let m = font.metrics(&[]).scale(px);
+    let (asc, desc) = (m.ascent, m.descent.abs());
+    let ls = -0.05 * px;
+    let mut pen = 0.0f32;
+    let mut glyphs = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let g = cmap.map(ch);
+        glyphs.push((g, pen));
+        pen += gm.advance_width(g) + ls;
+    }
+    let advance = (pen - ls).max(1.0);
+    let margin = (0.06 * px).ceil();
+    let (w, h) = ((advance + 2.0 * margin).ceil() as usize, (asc + desc + 2.0 * margin).ceil() as usize);
+    let baseline = margin + asc;
+    let mut alpha = vec![0u8; w * h];
+    SCALER.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        let mut scaler = ctx.builder(font).size(px).hint(false).build();
+        for (g, x) in glyphs {
+            let ox = margin + x;
+            let mut r = Render::new(&[Source::Outline]);
+            r.format(Format::Alpha).offset(Vector::new(ox.fract(), baseline.fract()));
+            let Some(img) = r.render(&mut scaler, g) else { continue };
+            let p = img.placement;
+            let (x0, y0) = (ox.floor() as i32 + p.left, baseline.floor() as i32 - p.top);
+            for row in 0..p.height as i32 {
+                let y = y0 + row;
+                if y < 0 || y >= h as i32 {
+                    continue;
+                }
+                for col in 0..p.width as i32 {
+                    let x = x0 + col;
+                    if x < 0 || x >= w as i32 {
+                        continue;
+                    }
+                    let a = img.data[(row * p.width as i32 + col) as usize];
+                    let d = &mut alpha[y as usize * w + x as usize];
+                    *d = d.saturating_add(a);
+                }
+            }
+        }
+    });
+    let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w as u32, h as u32);
+    for (o, a) in buf.make_mut_slice().iter_mut().zip(alpha) {
+        *o = slint::Rgba8Pixel { r: 255, g: 255, b: 255, a };
+    }
+    // Element box: padding .28em left, .1em top, line box 1em; glyph box centred in it.
+    let (iw, ih) = (w as f32 / k, h as f32 / k);
+    Some(WordTex {
+        img: slint::Image::from_rgba8(buf),
+        iw,
+        ih,
+        ix: 0.28 * em - margin / k,
+        iy: 0.6 * em - (margin + (asc + desc) / 2.0) / k,
+        tw: advance / k,
+    })
 }
 
 fn tab(arr: &[f32], x: f32) -> f32 {
@@ -295,6 +380,7 @@ fn layout(look: Look, k: f32, w: &KW, fit: f32, c: &Stage) -> L {
             x: w.jx * c.w * 0.12 * (0.45 + 0.55 * near),
             z: -ak * c.u * 0.1,
             b: tab(&[0.0, 1.1, 2.3, 3.4, 4.0], ak),
+            rz: w.jr * 2.5,
         },
         Look::Ship => L {
             s: tab(
@@ -306,6 +392,7 @@ fn layout(look: Look, k: f32, w: &KW, fit: f32, c: &Stage) -> L {
             x: w.jx * c.w * 0.2 * (0.35 + 0.65 * near) + (c.t * 0.8 + w.jr * 10.0).sin() * c.w * 0.008 * ak,
             z: -ak * c.u * 0.2,
             b: tab(&[0.0, 0.6, 1.2, 1.9, 2.5, 3.0, 3.4, 3.8, 4.0], ak),
+            rz: w.jr * 4.0,
         },
         Look::Fisheye => {
             let th = (k * 0.5).clamp(-1.45, 1.45);
@@ -318,6 +405,7 @@ fn layout(look: Look, k: f32, w: &KW, fit: f32, c: &Stage) -> L {
                     - th.abs().sin() * c.w * 0.05 * (if w.jx < 0.0 { -1.0 } else { 1.0 }) * 0.6,
                 z: (ct - 0.55) * c.u * 0.34,
                 b: if ak < 0.5 { 0.0 } else { (ak * 0.9).min(3.4) },
+                rz: w.jr * 1.6,
             }
         }
     }
@@ -392,8 +480,13 @@ struct Karaoke {
     t: f32,
     hint: i64,
     slots: Rc<VecModel<KWord>>,
+    motion: Rc<VecModel<KMotion>>,
     /// lyric, highlight, secondary
     colors: [slint::Color; 3],
+    /// Word textures for the words on stage (by word index), all at `tex_em` / `tex_sf`.
+    tex: std::collections::HashMap<usize, WordTex>,
+    tex_em: f32,
+    tex_sf: f32,
 }
 
 fn mix(a: slint::Color, b: slint::Color, t: f32) -> slint::Color {
@@ -414,7 +507,11 @@ impl Karaoke {
             t: 0.0,
             hint: -1,
             slots: Rc::new(VecModel::from(vec![KWord::default(); SLOTS])),
+            motion: Rc::new(VecModel::from(vec![KMotion::default(); SLOTS])),
             colors: [slint::Color::from_rgb_u8(255, 255, 255); 3],
+            tex: std::collections::HashMap::new(),
+            tex_em: 0.0,
+            tex_sf: 0.0,
         }
     }
 
@@ -429,6 +526,7 @@ impl Karaoke {
 
     fn set_words(&mut self, lyrics: Option<&Lyrics>) {
         self.words.clear();
+        self.tex.clear();
         if let Some(l) = lyrics {
             WORD_FONT.with(|f| {
                 for line in &l.lines {
@@ -442,6 +540,7 @@ impl Karaoke {
                         let end = line.ends.get(j).map_or(start + 300, |&e| e as i64).max(start + 60);
                         self.words.push(KW {
                             text: (*t).into(),
+                            tilt: (rnd(i, 3.0) * 2.0 - 1.0) * 3.2,
                             start,
                             end,
                             end_eff: 0,
@@ -497,7 +596,7 @@ impl Karaoke {
         i.max(-1)
     }
 
-    fn update(&mut self, pos: i64, dt: f32, snap: bool, sw: f32, sh: f32) {
+    fn update(&mut self, pos: i64, dt: f32, snap: bool, sw: f32, sh: f32, sf: f32) {
         if self.words.is_empty() {
             self.hide_all();
             return;
@@ -531,20 +630,30 @@ impl Karaoke {
         self.vel = (self.cursor - self.last_cursor) / dt * 1000.0;
         self.last_cursor = self.cursor;
         self.t += dt / 1000.0;
-        self.render(pos, sw, sh);
+        self.render(pos, sw, sh, sf);
     }
 
-    fn hide_all(&self) {
+    fn hide_all(&mut self) {
+        self.tex.clear();
         for i in 0..SLOTS {
-            if self.slots.row_data(i).is_some_and(|w| w.opacity > 0.0) {
+            if self.motion.row_data(i).is_some_and(|m| m.opacity > 0.0) {
+                self.motion.set_row_data(i, KMotion::default());
+            }
+            if self.slots.row_data(i).is_some_and(|w| w.img.size().width > 0) {
                 self.slots.set_row_data(i, KWord::default());
             }
         }
     }
 
-    fn render(&self, pos: i64, sw: f32, sh: f32) {
+    fn render(&mut self, pos: i64, sw: f32, sh: f32, sf: f32) {
         let c = Stage { w: sw, h: sh, u: sw.min(sh * 1.2), t: self.t };
         let fs = (c.u * 0.125).clamp(40.0, 200.0);
+        // Re-rasterize only when the base size really changes (resize / DPI change).
+        if (fs - self.tex_em).abs() > 0.5 || sf != self.tex_sf {
+            self.tex.clear();
+            self.tex_em = fs;
+            self.tex_sf = sf;
+        }
         let (prev, next) = match self.look {
             Look::Stack => (3.0, 3.0),
             Look::Ship => (8.0, 3.0),
@@ -555,7 +664,7 @@ impl Karaoke {
         let lo = (ci - prev as i64 - 1).max(0);
         let hi = (ci + next as i64 + 1).min(n - 1);
         let motion_blur = (self.vel.abs() * 0.7).min(2.6);
-        let mut out: Vec<(f32, KWord)> = Vec::with_capacity(SLOTS);
+        let mut out: Vec<(usize, KWord, KMotion)> = Vec::with_capacity(SLOTS);
         for i in lo..=hi {
             let w = &self.words[i as usize];
             let kk = i as f32 - self.cursor;
@@ -565,6 +674,7 @@ impl Karaoke {
             let p = layout(self.look, kk, w, fit, &c);
             // No blur in the software renderer: blurred words read as a little dimmer instead.
             let blur = p.b * 0.6 + motion_blur * ak.min(1.5) * 0.5;
+            // (No blur filter in Slint: blurred words read as a little dimmer instead.)
             let o = if beyond { 0.0 } else { p.o / (1.0 + blur * 0.12) };
             if o < 0.01 {
                 continue;
@@ -573,7 +683,14 @@ impl Karaoke {
             let k = PERSPECTIVE / (PERSPECTIVE - p.z);
             let x = c.w / 2.0 + p.x * k;
             let y = c.h * 0.46 + (c.h * 0.04 + p.y) * k;
-            let size = fs * p.s.max(0.02) * k;
+            let scale = p.s.max(0.02) * k;
+            let i = i as usize;
+            if !self.tex.contains_key(&i) {
+                let Some(t) = rasterize(&self.words[i].text, fs, sf) else { continue };
+                self.tex.insert(i, t);
+            }
+            let tex = &self.tex[&i];
+            let w = &self.words[i];
 
             let (state, bp, ha) = if pos < w.start {
                 (0, 0.0, 0.0)
@@ -590,34 +707,55 @@ impl Karaoke {
             let color = match state {
                 0 => lyric.with_alpha(0.36),
                 1 => white,
-                _ => mix(white, secondary, (pos - w.end_eff) as f32 / 160.0),
+                // Quantized so the 160 ms fade uses a handful of recolours, not one per frame.
+                _ => mix(white, secondary, (((pos - w.end_eff) as f32 / 160.0) * 8.0).round() / 8.0),
             };
+            // Stable slot per word, so a slot's texture only changes when a new word arrives.
             out.push((
-                ak,
+                i % SLOTS,
                 KWord {
-                    text: w.text.clone(),
-                    x: x.round(),
-                    y: y.round(),
-                    size: (size * 2.0).round() / 2.0,
-                    opacity: (o * 100.0).round() / 100.0,
-                    state,
+                    img: tex.img.clone(),
+                    iw: tex.iw,
+                    ih: tex.ih,
+                    ix: tex.ix,
+                    iy: tex.iy,
+                    tw: tex.tw,
+                    base: fs,
+                    tilt: w.tilt,
                     color,
-                    hl: (ha * 100.0).round() / 100.0,
+                    icon: icon.into(),
+                    icon_left: w.icon_left,
+                },
+                KMotion {
+                    x,
+                    y,
+                    scale,
+                    rot: p.rz,
+                    // Nearest on top.
+                    z: -ak,
+                    opacity: o,
+                    hl: ha * o,
                     hl_sx: 0.86 + 0.14 * bp,
                     hl_sy: 0.9 + 0.1 * bp,
                     hl_dx: (1.0 - bp) * -0.1,
-                    icon: icon.into(),
-                    icon_left: w.icon_left,
                     icon_scale: 0.35 + 0.65 * bp.min(1.15),
+                    icon_rot: (1.0 - bp) * -25.0,
                 },
             ));
         }
-        // Farthest first, so the focus word is painted on top.
-        out.sort_by(|a, b| b.0.total_cmp(&a.0));
-        for i in 0..SLOTS {
-            let new = out.get(i).map(|o| o.1.clone()).unwrap_or_default();
-            if self.slots.row_data(i).as_ref() != Some(&new) {
-                self.slots.set_row_data(i, new);
+        // Drop textures of words that left the stage (keeps a couple either side).
+        self.tex.retain(|&i, _| (i as i64) >= lo - 2 && (i as i64) <= hi + 2);
+        let mut used = [false; SLOTS];
+        for (slot, word, motion) in out {
+            used[slot] = true;
+            if self.slots.row_data(slot).as_ref() != Some(&word) {
+                self.slots.set_row_data(slot, word);
+            }
+            self.motion.set_row_data(slot, motion);
+        }
+        for (slot, used) in used.iter().enumerate() {
+            if !used && self.motion.row_data(slot).is_some_and(|m| m.opacity > 0.0) {
+                self.motion.set_row_data(slot, KMotion::default());
             }
         }
     }
@@ -627,7 +765,6 @@ impl Karaoke {
 // State, clock and the frame timer.
 
 struct Settings {
-    headphones: bool,
     k_style: String,
     k_colors: [usize; 3],
 }
@@ -651,14 +788,13 @@ fn load_settings() -> Settings {
         .unwrap_or_default();
     let col = |i: usize| v["k_colors"][i].as_u64().map_or(0, |c| c as usize % palette(i).len());
     Settings {
-        headphones: v["headphones"].as_bool().unwrap_or(false),
         k_style: v["k_style"].as_str().unwrap_or("visual").to_string(),
         k_colors: [col(0), col(1), col(2)],
     }
 }
 
 fn save_settings(s: &Settings) {
-    let v = serde_json::json!({ "headphones": s.headphones, "k_style": s.k_style, "k_colors": s.k_colors });
+    let v = serde_json::json!({ "k_style": s.k_style, "k_colors": s.k_colors });
     let _ = std::fs::write(settings_path(), v.to_string());
 }
 
@@ -674,15 +810,14 @@ struct State {
     karaoke_words: Option<Rc<Lyrics>>,
     laid_out_w: f32,
     active: i32,
-    nudge: i64,
     settings: Settings,
     karaoke: Karaoke,
     last_frame: Instant,
     last_lyric: i64,
     snap: bool,
     timer: slint::Timer,
-    interval: Duration,
-    flash: slint::Timer,
+    /// The renderer calls frame() before every frame (GPU renderer): karaoke runs on vsync.
+    vsync: bool,
 }
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
@@ -697,10 +832,6 @@ impl State {
         } else {
             self.pos
         }
-    }
-
-    fn lyric_ms(&self, pos: u32) -> i64 {
-        pos as i64 + self.nudge + if self.settings.headphones { HEADPHONES_MS } else { 0 }
     }
 
     fn karaoke_on(&self, ui: &MainWindow) -> bool {
@@ -723,7 +854,7 @@ fn tick() {
         let pb = ui.global::<Playback>();
         let pos = s.now();
         pb.set_position_ms(pos as i32);
-        let lyric = s.lyric_ms(pos);
+        let lyric = pos as i64;
         pb.set_lyric_ms(lyric.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
         if (lyric - s.last_lyric).abs() > 1500 {
             s.snap = true;
@@ -745,28 +876,30 @@ fn tick() {
         s.last_frame = now;
         if s.karaoke_on(&ui) {
             let (w, h) = window_size(&ui);
-            s.karaoke.update(lyric, dt, s.snap, w, h);
+            s.karaoke.update(lyric, dt, s.snap, w, h, ui.window().scale_factor());
             s.snap = false;
         }
 
         let want = if !s.playing {
             None
         } else if s.karaoke_on(&ui) {
-            // The stage animates continuously; 30 fps keeps a full-window repaint affordable.
-            Some(Duration::from_millis(33))
+            if s.vsync {
+                // Next vsync frame calls frame() -> tick() again.
+                s.timer.stop();
+                ui.window().request_redraw();
+                return;
+            }
+            Some(Duration::from_millis(16))
         } else if pb.get_expanded() {
             // Wake exactly when the next letter or line lights (at most 250 ms apart for the
-            // progress bars): every repaint is a full-window one, so no frame is wasted.
+            // progress bars); Slint's own animations run on vsync in between.
             Some(next_change(s, lyric))
         } else {
-            Some(Duration::from_millis(250))
+            Some(Duration::from_millis(500))
         };
         match want {
             None => s.timer.stop(),
-            Some(d) => {
-                s.interval = d;
-                s.timer.start(slint::TimerMode::SingleShot, d, tick);
-            }
+            Some(d) => s.timer.start(slint::TimerMode::SingleShot, d, tick),
         }
     });
 }
@@ -840,7 +973,7 @@ pub fn init(ui: &MainWindow) {
     karaoke.set_style(&settings.k_style);
     let pb = ui.global::<Playback>();
     pb.set_k_words(ModelRc::from(karaoke.slots.clone()));
-    pb.set_headphones(settings.headphones);
+    pb.set_k_motion(ModelRc::from(karaoke.motion.clone()));
     pb.set_k_style(settings.k_style.as_str().into());
     pb.set_karaoke_allowed(cfg!(feature = "karaoke"));
     apply_colors(&pb, &settings, &mut karaoke);
@@ -855,29 +988,16 @@ pub fn init(ui: &MainWindow) {
             karaoke_words: None,
             laid_out_w: 0.0,
             active: -1,
-            nudge: 0,
             settings,
             karaoke,
             last_frame: Instant::now(),
             last_lyric: 0,
             snap: true,
             timer: slint::Timer::default(),
-            interval: Duration::ZERO,
-            flash: slint::Timer::default(),
+            vsync: false,
         })
     });
 
-    pb.on_nudge(|d| {
-        with(|s| s.nudge += d as i64);
-        let n = with(|s| s.nudge).unwrap_or(0);
-        if let Some(ui) = with(|s| s.ui.upgrade()).flatten() {
-            ui.global::<Playback>().set_nudge_ms(n as i32);
-        }
-        with(|s| s.snap = true);
-        tick();
-    });
-    pb.on_sync_reset(sync_reset);
-    pb.on_toggle_headphones(toggle_headphones);
     pb.on_set_karaoke(set_karaoke);
     pb.on_set_k_style(|name| {
         with(|s| {
@@ -919,37 +1039,6 @@ pub fn init(ui: &MainWindow) {
     });
 }
 
-fn sync_reset() {
-    with(|s| {
-        s.nudge = 0;
-        s.snap = true;
-        if let Some(ui) = s.ui.upgrade() {
-            let pb = ui.global::<Playback>();
-            pb.set_nudge_ms(0);
-            pb.set_sync_flash(true);
-            let weak = s.ui.clone();
-            s.flash.start(slint::TimerMode::SingleShot, Duration::from_millis(900), move || {
-                if let Some(ui) = weak.upgrade() {
-                    ui.global::<Playback>().set_sync_flash(false);
-                }
-            });
-        }
-    });
-    tick();
-}
-
-fn toggle_headphones() {
-    with(|s| {
-        s.settings.headphones = !s.settings.headphones;
-        save_settings(&s.settings);
-        s.snap = true;
-        if let Some(ui) = s.ui.upgrade() {
-            ui.global::<Playback>().set_headphones(s.settings.headphones);
-        }
-    });
-    tick();
-}
-
 fn set_karaoke(on: bool) {
     with(|s| {
         if let Some(ui) = s.ui.upgrade() {
@@ -965,20 +1054,46 @@ fn set_karaoke(on: bool) {
     tick();
 }
 
-/// Keyboard shortcuts on the lyrics page: h, k, s.
+/// Keyboard shortcut on the lyrics page: k toggles karaoke.
 pub fn key(k: &str) {
-    match k {
-        "h" => toggle_headphones(),
-        "s" => sync_reset(),
-        "k" => {
-            let on = with(|s| s.ui.upgrade().map(|u| u.global::<Playback>().get_karaoke())).flatten().unwrap_or(false);
-            set_karaoke(!on);
-        }
-        _ => {}
+    if k == "k" {
+        let on = with(|s| s.ui.upgrade().map(|u| u.global::<Playback>().get_karaoke())).flatten().unwrap_or(false);
+        set_karaoke(!on);
     }
 }
 
-/// A new track: reset the clock, the lyrics and the per-track nudge.
+/// The GPU renderer is up: drive karaoke from frame() instead of a timer.
+pub fn enable_vsync() {
+    with(|s| s.vsync = true);
+}
+
+/// Called by the renderer before every frame. Only the karaoke stage needs per-frame work;
+/// everything else returns at once.
+pub fn frame() {
+    // CADENCE_FPS=1: print rendered frames per second (diagnostics).
+    thread_local! { static FPS: std::cell::Cell<(bool, u32, Option<Instant>)> = const { std::cell::Cell::new((false, 0, None)) }; }
+    FPS.with(|c| {
+        let (init, n, t) = c.get();
+        let on = if init { t.is_some() } else { std::env::var("CADENCE_FPS").is_ok_and(|v| v == "1") };
+        if !on {
+            c.set((true, 0, None));
+            return;
+        }
+        let t0 = t.unwrap_or_else(Instant::now);
+        if t0.elapsed() >= Duration::from_secs(1) {
+            eprintln!("fps: {}", n + 1);
+            c.set((true, 0, Some(Instant::now())));
+        } else {
+            c.set((true, n + 1, Some(t0)));
+        }
+    });
+    let busy = with(|s| s.vsync && s.playing && s.ui.upgrade().is_some_and(|ui| s.karaoke_on(&ui))).unwrap_or(false);
+    if busy {
+        tick();
+    }
+}
+
+/// A new track: reset the clock and the lyrics.
 pub fn on_track(duration_ms: u32) {
     with(|s| {
         s.pos = 0;
@@ -987,12 +1102,10 @@ pub fn on_track(duration_ms: u32) {
         s.lyrics = None;
         s.karaoke_words = None;
         s.karaoke.set_words(None);
-        s.nudge = 0;
         s.active = -1;
         s.snap = true;
         if let Some(ui) = s.ui.upgrade() {
             let pb = ui.global::<Playback>();
-            pb.set_nudge_ms(0);
             pb.set_lyr_active(-1);
             pb.set_lyr_synced(false);
             pb.set_lyr_hint("finding lyrics…".into());

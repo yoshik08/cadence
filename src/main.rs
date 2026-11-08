@@ -537,6 +537,22 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.window().set_size(slint::LogicalSize::new(w, h));
     }
     lyrics_view::init(&ui);
+    // GPU renderer (femtovg, vsync on): run the karaoke stage once per displayed frame. The
+    // software fallback renderer has no notifier; lyrics_view then keeps its timer.
+    if ui
+        .window()
+        .set_rendering_notifier(|state, _| {
+            if let slint::RenderingState::BeforeRendering = state {
+                lyrics_view::frame();
+            }
+        })
+        .is_ok()
+    {
+        eprintln!("renderer: GPU, vsync");
+        lyrics_view::enable_vsync();
+    } else {
+        eprintln!("renderer: software");
+    }
     ui.on_play_pause_key(|| with_player(|p| p.play_pause()));
     ui.on_lyrics_key(|k| lyrics_view::key(&k));
     ui.on_relayout_lyrics(lyrics_view::relayout);

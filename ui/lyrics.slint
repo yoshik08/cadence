@@ -7,7 +7,7 @@
 // its rows already wrapped for the current window and with its exact height and offset, so the
 // scroll target is known without measuring anything here. Rust also drives `lyric-ms`, the
 // active line and the karaoke word slots.
-import { Playback, LyrLine, KWord, Icons } from "now_playing.slint";
+import { Playback, LyrLine, KWord, KMotion, Icons } from "now_playing.slint";
 
 // Geometry shared with Rust (lyrics_view::Geometry). Change both together.
 export global LyrGeo {
@@ -70,20 +70,41 @@ component Pill inherits Rectangle {
     }
 }
 
-component NudgeButton inherits Rectangle {
-    in property <string> label;
+// A round icon button for the lyrics page transport.
+component TransportButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> solid;
+    in property <bool> active;
+    in property <length> icon-size: 20px;
     callback clicked;
-    width: 32px;
-    background: ta.has-hover ? #ffffff1f : transparent;
-    animate background { duration: 150ms; }
-    Text {
-        text: root.label;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        font-family: "Bricolage Grotesque";
-        font-size: 15px;
-        font-weight: 500;
-        color: #ffffff;
+    property <color> tint: root.active || ta.has-hover || root.solid ? #ffffff : #ffffff8c;
+    width: 40px;
+    height: 40px;
+    border-radius: self.width / 2;
+    background: ta.pressed ? #ffffff2e : ta.has-hover ? #ffffff17 : transparent;
+    animate background { duration: 150ms; easing: ease; }
+    animate tint { duration: 150ms; easing: ease; }
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: root.icon-size;
+        height: root.icon-size;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.icon;
+        fill: root.solid ? root.tint : transparent;
+        stroke: root.tint;
+        stroke-width: (root.solid ? 0.6 : 2) * root.icon-size / 24px * 1px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+    if root.active : Rectangle {
+        x: (parent.width - 4px) / 2;
+        y: parent.height - 5px;
+        width: 4px;
+        height: 4px;
+        border-radius: 2px;
+        background: #ffffff;
     }
     ta := TouchArea {
         mouse-cursor: pointer;
@@ -91,59 +112,50 @@ component NudgeButton inherits Rectangle {
     }
 }
 
-// .sync-group: [−][⟳ Sync][+]. − shows lyrics 50 ms later, + 50 ms earlier, Sync resets.
-component SyncGroup inherits Rectangle {
-    property <bool> custom: Playback.nudge-ms != 0;
-    property <string> resting: (Playback.karaoke ? "K " : "") + "Sync";
-    height: 38px;
-    width: minus.width + mid.width + plus.width;
-    border-radius: 19px;
-    border-width: 1px;
-    border-color: #ffffff24;
-    background: #ffffff14;
-    clip: true;
-    minus := NudgeButton {
-        x: 0;
-        height: parent.height;
-        label: "−";
-        clicked => { Playback.nudge(-50); }
+// The white play / pause disc.
+component PlayDisc inherits Rectangle {
+    in property <length> size: 56px;
+    width: root.size;
+    height: root.size;
+    border-radius: root.size / 2;
+    background: ta.pressed ? #ffffffbf : #ffffff;
+    animate background { duration: 120ms; easing: ease; }
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: root.size * 0.46;
+        height: root.size * 0.46;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: Playback.playing ? Icons.pause : Icons.play;
+        fill: #08080a;
+        stroke: #08080a;
+        stroke-width: 0.6 * root.size * 0.46 / 24px * 1px;
+        stroke-line-join: round;
     }
-    mid := Rectangle {
-        x: minus.width;
-        height: parent.height;
-        width: max(74px, mid-row.preferred-width);
-        background: Playback.sync-flash ? #ffffff : root.custom ? #ffd84d1f : mid-ta.has-hover ? #ffffff1f : transparent;
-        Rectangle { x: 0; width: 1px; background: #ffffff24; }
-        Rectangle { x: parent.width - 1px; width: 1px; background: #ffffff24; }
-        mid-row := HorizontalLayout {
-            padding-left: 14px;
-            padding-right: 14px;
-            spacing: 6px;
-            alignment: center;
-            Glyph {
-                y: (parent.height - self.height) / 2;
-                commands: Icons.sync;
-                tint: Playback.sync-flash ? #000000 : root.custom ? #ffd84d : #ffffff;
-            }
-            Text {
-                text: Playback.sync-flash ? "✓" : root.custom ? ((Playback.karaoke ? "K " : "") + (Playback.nudge-ms > 0 ? "+" : "") + Playback.nudge-ms + "ms") : root.resting;
-                vertical-alignment: center;
-                font-family: "Bricolage Grotesque";
-                font-size: 13px;
-                font-weight: 500;
-                color: Playback.sync-flash ? #000000 : root.custom ? #ffd84d : #ffffff;
-            }
-        }
-        mid-ta := TouchArea {
-            mouse-cursor: pointer;
-            clicked => { Playback.sync-reset(); }
-        }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { Playback.play-pause(); }
     }
-    plus := NudgeButton {
-        x: minus.width + mid.width;
-        height: parent.height;
-        label: "+";
-        clicked => { Playback.nudge(50); }
+}
+
+// shuffle · prev · play · next · repeat
+component Transport inherits HorizontalLayout {
+    in property <length> disc: 56px;
+    spacing: 14px;
+    alignment: center;
+    TransportButton { y: (parent.height - self.height) / 2; icon: Icons.shuffle; active: Playback.shuffle; icon-size: 18px; clicked => { Playback.toggle-shuffle(); } }
+    TransportButton { y: (parent.height - self.height) / 2; icon: Icons.prev; solid: true; icon-size: 22px; clicked => { Playback.prev(); } }
+    PlayDisc { y: (parent.height - self.height) / 2; size: root.disc; }
+    TransportButton { y: (parent.height - self.height) / 2; icon: Icons.next; solid: true; icon-size: 22px; clicked => { Playback.next(); } }
+    TransportButton { y: (parent.height - self.height) / 2; icon: Icons.repeat; active: Playback.repeat; icon-size: 18px; clicked => { Playback.toggle-repeat(); } }
+}
+
+global Clock {
+    public pure function mmss(ms: int) -> string {
+        let secs = Math.floor(Math.max(ms, 0) / 1000);
+        let sec = Math.mod(secs, 60);
+        return "\{Math.floor(secs / 60)}:\{sec < 10 ? "0" : ""}\{sec}";
     }
 }
 
@@ -218,7 +230,8 @@ component LyricLineView inherits Rectangle {
                     font-family: "Bricolage Grotesque 36pt SemiCondensed";
                     font-weight: 700;
                     font-size: root.fs;
-                    // Lights instantly: an 80 ms fade would cost a dozen full-window repaints per letter.
+                    // Lights instantly: a fade per letter would keep the renderer drawing at the
+                    // display rate for the whole line. Frames happen only when a letter is due.
                     color: Playback.lyric-ms >= letter.at ? #ffffff : #ffffff59;
                 }
                 if word.space : Text {
@@ -306,58 +319,63 @@ component LyricsColumn inherits Rectangle {
     }
 }
 
-// One karaoke word (.vk-w): highlight box, text, optional glyph. Every number comes from Rust.
+// One karaoke word (.vk-w): highlight box, word texture, optional glyph, laid out at the base em
+// (padding .1em .28em .14em, line-height 1) and scaled / tilted on the GPU around 50% 55%.
 component KaraokeWord inherits Rectangle {
     in property <KWord> w;
-    property <length> em: root.w.size;
-    // Element box: the text plus padding .1em .28em .14em, line-height 1.
-    property <length> bw: t.preferred-width + 0.56 * root.em;
-    property <length> bh: 1.24 * root.em;
-    property <length> bx: root.w.x - root.bw / 2;
-    property <length> by: root.w.y - root.bh / 2;
-    visible: root.w.opacity > 0.01;
-    opacity: root.w.opacity;
+    in property <KMotion> m;
+    property <length> em: root.w.base;
+    visible: root.m.opacity > 0.004;
+    z: root.m.z;
+    width: root.w.tw + 0.56 * root.em;
+    height: 1.24 * root.em;
+    x: root.m.x - self.width / 2;
+    y: root.m.y - self.height / 2;
+    transform-origin: { x: self.width / 2, y: self.height * 0.55 };
+    transform-scale: root.m.scale;
+    transform-rotation: root.m.rot * 1deg;
 
-    // .vk-hl: inset .03em .05em .05em, radius .22em, scaled around 28% 60%.
-    property <length> hw: root.bw - 0.1 * root.em;
-    property <length> hh: root.bh - 0.08 * root.em;
-    property <length> hx0: root.bx + 0.05 * root.em;
-    property <length> hy0: root.by + 0.03 * root.em;
-    Rectangle {
-        visible: root.w.hl > 0.001;
-        opacity: root.w.hl;
-        x: root.hx0 + root.hw * 0.28 * (1 - root.w.hl-sx) + root.w.hl-dx * root.em;
-        y: root.hy0 + root.hh * 0.6 * (1 - root.w.hl-sy);
-        width: root.hw * root.w.hl-sx;
-        height: root.hh * root.w.hl-sy;
-        border-radius: 0.22 * root.em * root.w.hl-sy;
-        background: Playback.k-highlight;
+    // .vk-hl: inset .03em .05em .05em, radius .22em, slides in and scales around 28% 60%, tilted.
+    if root.m.hl > 0.003 : Rectangle {
+        x: 0.05 * root.em + root.m.hl-dx * root.em;
+        y: 0.03 * root.em;
+        width: parent.width - 0.1 * root.em;
+        height: parent.height - 0.08 * root.em;
+        border-radius: 0.22 * root.em;
+        background: Playback.k-highlight.with-alpha(root.m.hl);
+        transform-origin: { x: self.width * 0.28, y: self.height * 0.6 };
+        transform-scale-x: root.m.hl-sx;
+        transform-scale-y: root.m.hl-sy;
+        transform-rotation: root.w.tilt * 1deg;
     }
-    t := Text {
-        x: root.w.x - self.width / 2;
-        y: root.w.y - self.height / 2;
-        text: root.w.text;
-        font-family: "Bricolage Grotesque 96pt SemiCondensed";
-        font-weight: 800;
-        font-size: root.em;
-        letter-spacing: -0.05 * root.em;
-        color: root.w.color;
+    Image {
+        x: root.w.ix;
+        y: root.w.iy;
+        width: root.w.iw;
+        height: root.w.ih;
+        source: root.w.img;
+        // Static per state, so the recoloured texture stays cached; fades go through opacity.
+        colorize: root.w.color;
+        opacity: root.m.opacity;
+        image-rendering: smooth;
     }
-    if root.w.icon != "" : Path {
-        property <length> s: 0.82 * root.em * root.w.icon-scale;
-        x: root.w.icon-left ? root.bx + 0.1 * root.em - 0.41 * root.em - self.s / 2 : root.bx + root.bw - 0.1 * root.em + 0.41 * root.em - self.s / 2;
-        y: root.w.y - self.s / 2;
-        width: self.s;
-        height: self.s;
-        opacity: root.w.hl;
+    if root.w.icon != "" && root.m.hl > 0.003 : Path {
+        x: root.w.icon-left ? 0.1 * root.em - 0.82 * root.em : parent.width - 0.1 * root.em;
+        y: parent.height / 2 - 0.41 * root.em;
+        width: 0.82 * root.em;
+        height: 0.82 * root.em;
         viewbox-width: 24;
         viewbox-height: 24;
         commands: root.w.icon;
         fill: transparent;
         stroke: Playback.k-highlight;
-        stroke-width: 2.3 * self.s / 24px * 1px;
+        opacity: root.m.hl;
+        stroke-width: 2.3 * 0.82 * root.em / 24px * 1px;
         stroke-line-cap: round;
         stroke-line-join: round;
+        transform-origin: { x: self.width / 2, y: self.height / 2 };
+        transform-scale: root.m.icon-scale;
+        transform-rotation: root.m.icon-rot * 1deg;
     }
 }
 
@@ -471,8 +489,9 @@ export component LyricsOverlay inherits Rectangle {
     property <length> pad: LyrGeo.pad-x(root.width);
     property <length> side: LyrGeo.side-w(root.width);
     property <length> col-x: root.pad + root.side + root.pad;
-    // .lyrics-side block: art, 18 gap, title, 5, artist, 20, 5px progress.
-    property <length> side-h: root.side + 18px + 22px + 5px + 18px + 20px + 5px;
+    // .lyrics-side block: art, 18 gap, title, 5, artist, 20, 5px progress, then times and transport.
+    property <length> prog-y: root.side + 18px + 22px + 5px + 18px + 20px;
+    property <length> side-h: root.prog-y + 5px + 8px + 16px + 10px + 56px;
     // Karaoke chrome hides after 3 s without pointer movement.
     property <bool> idle;
     property <duration> moved-at;
@@ -562,7 +581,7 @@ export component LyricsOverlay inherits Rectangle {
             }
             Rectangle {
                 x: 0;
-                y: root.side-h - 5px;
+                y: root.prog-y;
                 width: root.side;
                 height: 5px;
                 border-radius: 2.5px;
@@ -582,6 +601,32 @@ export component LyricsOverlay inherits Rectangle {
                     }
                 }
             }
+        }
+
+        // Times and transport under the progress bar.
+        Rectangle {
+            x: root.pad;
+            y: (parent.height - root.side-h) / 2 + root.prog-y + 13px;
+            width: root.side;
+            height: 16px;
+            Text {
+                x: 0;
+                text: Clock.mmss(Playback.position-ms);
+                font-size: 12px;
+                color: #ffffff8c;
+            }
+            Text {
+                x: parent.width - self.width;
+                text: Clock.mmss(Playback.duration-ms);
+                font-size: 12px;
+                color: #ffffff8c;
+            }
+        }
+        Transport {
+            x: root.pad;
+            y: (parent.height - root.side-h) / 2 + root.side-h - 56px;
+            width: root.side;
+            height: 56px;
         }
 
         // .lyrics-lines
@@ -605,7 +650,7 @@ export component LyricsOverlay inherits Rectangle {
             image-fit: fill;
             image-rendering: smooth;
         }
-        for w in Playback.k-words : KaraokeWord { w: w; }
+        for w[i] in Playback.k-words : KaraokeWord { w: w; m: Playback.k-motion[i]; }
 
         // .vk-meta
         Rectangle {
@@ -670,12 +715,21 @@ export component LyricsOverlay inherits Rectangle {
         spacing: 12px;
         opacity: (root.karaoke && root.idle) ? 0 : 1;
         animate opacity { duration: 300ms; easing: ease; }
-        SyncGroup { }
-        Pill {
-            label: "Headphones";
-            icon: Icons.headphones;
-            active: Playback.headphones;
-            clicked => { Playback.toggle-headphones(); }
+        // Karaoke hides the side column, so its transport sits up here.
+        if root.karaoke : Rectangle {
+            width: kt.preferred-width + 8px;
+            border-radius: 19px;
+            border-width: 1px;
+            border-color: #ffffff24;
+            background: #ffffff14;
+            kt := HorizontalLayout {
+                x: 4px;
+                spacing: 2px;
+                alignment: center;
+                TransportButton { y: (parent.height - self.height) / 2; width: 34px; height: 34px; icon: Icons.prev; solid: true; icon-size: 16px; clicked => { Playback.prev(); } }
+                TransportButton { y: (parent.height - self.height) / 2; width: 34px; height: 34px; icon: Playback.playing ? Icons.pause : Icons.play; solid: true; icon-size: 16px; clicked => { Playback.play-pause(); } }
+                TransportButton { y: (parent.height - self.height) / 2; width: 34px; height: 34px; icon: Icons.next; solid: true; icon-size: 16px; clicked => { Playback.next(); } }
+            }
         }
         if Playback.karaoke-allowed : Pill {
             label: "Karaoke";

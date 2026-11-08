@@ -5,7 +5,7 @@
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](https://github.com/yoshik08/cadence/releases)
 [![Made with Rust](https://img.shields.io/badge/Made%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
-**Cadence is a lightweight Spotify desktop client for Windows, written entirely in Rust.** No Electron, no Chromium, no webview — just a native Slint UI on the software renderer, streaming through [librespot](https://github.com/librespot-org/librespot), and library browsing through the Spotify Web API ([rspotify](https://github.com/ramsayleung/rspotify)).
+**Cadence is a lightweight Spotify desktop client for Windows, written entirely in Rust.** No Electron, no Chromium, no webview — just a native Slint UI rendered with OpenGL, streaming through [librespot](https://github.com/librespot-org/librespot), and library browsing through the Spotify Web API ([rspotify](https://github.com/ramsayleung/rspotify)).
 
 It plays your Spotify library at 320 kbps with gapless playback and loudness normalisation, acts as a Spotify Connect device, and stays around **25 MB of RAM while playing** — roughly 10× lighter than the official Spotify desktop app.
 
@@ -17,9 +17,9 @@ Grab `cadence.exe` from the [latest release](https://github.com/yoshik08/cadence
 
 |  | Cadence | Official Spotify app |
 | --- | --- | --- |
-| RAM while playing | ~25 MB | ~300–500 MB |
+| RAM while playing | ~55–70 MB | ~300–500 MB |
 | Download size | ~12 MB | ~100 MB+ |
-| UI stack | Native Slint (software renderer) | Electron / Chromium |
+| UI stack | Native Slint (OpenGL, vsync) | Electron / Chromium |
 | Startup | Under 1 s | Several seconds |
 | Playback | 320 kbps, gapless, normalisation | 320 kbps |
 | Spotify Connect device | Yes | Yes |
@@ -30,10 +30,11 @@ Grab `cadence.exe` from the [latest release](https://github.com/yoshik08/cadence
 - Spotify Connect device named "Cadence": pick it from any Spotify app, or play from Cadence itself
 - Gapless playback and loudness normalisation
 - Media keys and the Windows media overlay (System Media Transport Controls)
-- Space plays and pauses, Esc closes the lyrics page (H toggles the headphones delay, S resets the lyric offset)
+- Space plays and pauses, Esc closes the lyrics page
 - Home (recently played, your playlists), search, playlist, album and artist pages, Liked Songs, and a sidebar with all your playlists
 - Lyrics page in the yoshik.xyz design: blurred album art, the active line centred with smooth scrolling, word-synced letters lighting up as they are sung, long lines wrapping instead of being cut, and type that scales with the window
-- Lyric offset nudges (−/+ 50 ms) and a Headphones toggle that delays lyrics 225 ms for Bluetooth audio
+- Playback controls on the lyrics page; lyrics follow the local player clock, so there is nothing to sync
+- GPU rendering (OpenGL) paced by vsync, so scrolling and karaoke run at the display refresh rate (falls back to the software renderer without OpenGL)
 - Everything is cached on disk once: played audio (up to 1 GB), album art, lyrics and library pages, so nothing is downloaded twice
 - The accent colour follows the current album art
 
@@ -91,9 +92,7 @@ Caches live in `%LOCALAPPDATA%\cadence\cache` (`audio`, `art`, `lyrics`, `api`),
 
 ## Memory
 
-Idle, offline release build (`CADENCE_OFFLINE=1`): 6.4 MB private working set, about 8 MB commit, about 8 threads.
-
-The software renderer's framebuffer costs 4 bytes per window pixel: 3.6 MB at 1200x780 and 100% scaling, about 8 MB for a maximised 1080p window, about 32 MB for a maximised 4K one.
+v1.3 renders on the GPU (OpenGL via Slint femtovg, vsync on), which trades some memory for frames paced to the display. Measured on 2026-11-08, release build, 1500x900 window, 180 Hz display: lyrics page closed 53 MB private working set and about 1% of a core; lyrics page open about 66 MB and 10%; karaoke (personal build) about 64 MB and 42% at a steady 180 fps. Flat over time. Most of the baseline is the OpenGL driver.
 
 To measure real playback, start a track with the library open, then run:
 

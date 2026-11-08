@@ -1,6 +1,6 @@
 import { Theme } from "theme.slint";
 import { Browse, Sidebar, BrowseArea } from "browse.slint";
-import { Playback, NowPlayingBar, LyrLine, LyrRow, LyrWord, LyrLetter, KWord } from "now_playing.slint";
+import { Playback, NowPlayingBar, LyrLine, LyrRow, LyrWord, LyrLetter, KWord, KMotion } from "now_playing.slint";
 import { LyricsOverlay } from "lyrics.slint";
 // The lyrics page type (yoshik.xyz uses Bricolage Grotesque; these are static instances of it).
 import "../assets/fonts/Bricolage-500.ttf";
@@ -9,7 +9,7 @@ import "../assets/fonts/Bricolage-SemiCondensed-700.ttf";
 import "../assets/fonts/Bricolage-SemiCondensed-800.ttf";
 import "../assets/fonts/JetBrainsMono-500.ttf";
 
-export { Browse, Playback, LyrLine, LyrRow, LyrWord, LyrLetter, KWord }
+export { Browse, Playback, LyrLine, LyrRow, LyrWord, LyrLetter, KWord, KMotion }
 
 export component MainWindow inherits Window {
     title: "Cadence";
@@ -65,8 +65,8 @@ export component MainWindow inherits Window {
                 }
                 return accept;
             }
-            // Lyrics page shortcuts (as on yoshik.xyz): H headphones, K karaoke, S resync.
-            if (Playback.expanded && !event.repeat && (event.text == "h" || event.text == "k" || event.text == "s")) {
+            // Lyrics page: K toggles karaoke (karaoke builds).
+            if (Playback.expanded && !event.repeat && event.text == "k") {
                 root.lyrics-key(event.text);
                 return accept;
             }

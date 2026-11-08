@@ -36,24 +36,40 @@ export struct LyrLine {
     ah: length,
 }
 
-// One karaoke word slot. Positions are the centre of the word, in window px.
+// One karaoke word slot, split in two so a frame never touches the texture: KWord changes only
+// when another word takes the slot (or its colour state changes); KMotion changes every frame.
+// The word is a texture rasterized once (Rust) at the base em; the GPU scales and tilts it.
 export struct KWord {
-    text: string,
+    img: image,
+    // Texture size, where it sits in the element box, the text advance width and the base em.
+    iw: length,
+    ih: length,
+    ix: length,
+    iy: length,
+    tw: length,
+    base: length,
+    // Highlight tilt (deg), text colour for the state, glyph.
+    tilt: float,
+    color: color,
+    icon: string,
+    icon-left: bool,
+}
+
+export struct KMotion {
+    // Centre in window px, scale relative to the base em, tilt (deg), paint order.
     x: length,
     y: length,
-    size: length,
+    scale: float,
+    rot: float,
+    z: float,
     opacity: float,
-    // 0 upcoming, 1 being sung, 2 sung; the text colour for that state (fades computed in Rust).
-    state: int,
-    color: color,
-    // Highlight box opacity, scale and slide (em).
+    // Highlight box opacity, scale and slide (em); glyph scale and turn.
     hl: float,
     hl-sx: float,
     hl-sy: float,
     hl-dx: float,
-    icon: string,
-    icon-left: bool,
     icon-scale: float,
+    icon-rot: float,
 }
 
 export global Playback {
@@ -85,11 +101,8 @@ export global Playback {
     in property <length> lyr-total-h;
     in property <int> lyr-active: -1;
     in property <string> lyr-hint;
-    // position-ms plus the nudge and headphones offsets.
+    // The lyrics clock: position-ms, refreshed when the next letter or line is due.
     in property <int> lyric-ms;
-    in property <int> nudge-ms;
-    in property <bool> sync-flash;
-    in property <bool> headphones;
     // Karaoke exists only in builds with the `karaoke` feature (`karaoke-allowed`).
     in property <bool> karaoke-allowed;
     in property <bool> karaoke-available;
@@ -99,6 +112,7 @@ export global Playback {
     in property <color> k-highlight: #ff3d8b;
     in property <color> k-secondary: #d6906c;
     in property <[KWord]> k-words;
+    in property <[KMotion]> k-motion;
     in property <image> k-bg;
 
     callback play-pause();
@@ -109,9 +123,6 @@ export global Playback {
     callback toggle-shuffle();
     callback toggle-repeat();
     callback open-context();
-    callback nudge(int);
-    callback sync-reset();
-    callback toggle-headphones();
     callback set-karaoke(bool);
     callback set-k-style(string);
     callback cycle-color(string, int);
@@ -137,9 +148,7 @@ export global Icons {
     out property <string> volume-mute: "M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z M22 9l-6 6 M16 9l6 6";
     out property <string> volume-low: "M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z M16 9a5 5 0 0 1 0 6";
     out property <string> volume-high: "M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z M16 9a5 5 0 0 1 0 6 M19.4 18.4a9 9 0 0 0 0-12.8";
-    out property <string> headphones: "M3 18v-6a9 9 0 0 1 18 0v6 M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z";
     out property <string> mic: "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z M19 10v2a7 7 0 0 1-14 0v-2 M12 19L12 22";
-    out property <string> sync: "M21 12a9 9 0 1 1-2.64-6.36 M21 3L21 9L15 9";
 }
 
 global Fmt {
