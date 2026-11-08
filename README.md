@@ -1,12 +1,45 @@
-# Cadence
+# Cadence — Lightweight Spotify Client for Windows (Pure Rust)
 
-A small Spotify desktop client for Windows, written entirely in Rust. The UI is Slint on its software renderer (no GPU stack, no webview), streaming is [librespot](https://github.com/librespot-org/librespot), and library browsing uses the Web API through [rspotify](https://github.com/ramsayleung/rspotify). The target is under 100 MB of private working set while playing with the library open.
+[![Release](https://img.shields.io/github/v/release/yoshik08/cadence)](https://github.com/yoshik08/cadence/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](https://github.com/yoshik08/cadence/releases)
+[![Made with Rust](https://img.shields.io/badge/Made%20with-Rust-orange.svg)](https://www.rust-lang.org/)
+
+**Cadence is a lightweight Spotify desktop client for Windows, written entirely in Rust.** No Electron, no Chromium, no webview — just a native Slint UI on the software renderer, streaming through [librespot](https://github.com/librespot-org/librespot), and library browsing through the Spotify Web API ([rspotify](https://github.com/ramsayleung/rspotify)).
+
+It plays your Spotify library at 320 kbps with gapless playback and loudness normalisation, acts as a Spotify Connect device, and stays around **25 MB of RAM while playing** — roughly 10× lighter than the official Spotify desktop app.
+
+## Download
+
+Grab `cadence.exe` from the [latest release](https://github.com/yoshik08/cadence/releases) (~12 MB, no installer, no dependencies). Windows 10 or 11, Spotify Premium required.
+
+## Why Cadence
+
+|  | Cadence | Official Spotify app |
+| --- | --- | --- |
+| RAM while playing | ~25 MB | ~300–500 MB |
+| Download size | ~12 MB | ~100 MB+ |
+| UI stack | Native Slint (software renderer) | Electron / Chromium |
+| Startup | Under 1 s | Several seconds |
+| Playback | 320 kbps, gapless, normalisation | 320 kbps |
+| Spotify Connect device | Yes | Yes |
+| Lyrics | Yes (synced) | Yes |
+
+## Features
+
+- Spotify Connect device named "Cadence": pick it from any Spotify app, or play from Cadence itself
+- Gapless playback and loudness normalisation
+- Media keys and the Windows media overlay (System Media Transport Controls)
+- Space plays and pauses, Esc closes the full player
+- Home (recently played, your playlists), search, playlist, album and artist pages, Liked Songs
+- Synced lyrics view with the accent colour pulled from the current album art
+- The accent colour follows the current album art
 
 ## Requirements
 
 - Windows 10 or 11
-- Rust stable (edition 2024, so a recent toolchain)
-- Visual Studio 2022 Build Tools with the "Desktop development with C++" workload
+- Rust stable (edition 2024, so a recent toolchain) — only if building from source
+- Visual Studio 2022 Build Tools with the "Desktop development with C++" workload — only if building from source
 - Spotify Premium (librespot only streams for Premium accounts, and the app owner needs it too, see Limits)
 
 No OpenSSL, cmake or NASM is needed: TLS is the Windows native stack (schannel).
@@ -15,7 +48,7 @@ No OpenSSL, cmake or NASM is needed: TLS is the Windows native stack (schannel).
 
 Cadence uses your own Spotify app for the Web API (PKCE, no client secret).
 
-1. Open <https://developer.spotify.com/dashboard> and log in.
+1. Open [https://developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) and log in.
 2. Create app. Pick any name and description.
 3. Under "Which API/SDKs are you planning to use?" select Web API.
 4. Add the redirect URI exactly as `http://127.0.0.1:8888/callback` and save.
@@ -49,20 +82,6 @@ For development, `cargo build --features smoke` adds a PNG snapshot writer. Two 
 - `CADENCE_SMOKE=1` opens an inactive window, writes a snapshot to `CADENCE_SNAPSHOT` (default `smoke.png`) after about 1.5 s, and exits.
 - `CADENCE_OFFLINE=1` opens an inactive window and keeps running until closed, for measuring idle memory.
 
-## Features
-
-- Spotify Connect device named "Cadence": pick it from any Spotify app, or play from Cadence itself
-- Gapless playback and loudness normalisation
-- Media keys and the Windows media overlay (System Media Transport Controls)
-- Space plays and pauses, Esc closes the full player
-- Home (recently played, your playlists), search, playlist, album and artist pages, Liked Songs
-- The accent colour follows the current album art
-
-## Limits
-
-- New Spotify apps start in Development Mode. They are capped to a small allowlist of users until extended quota mode is approved. The cap was 25 users, and Spotify cut it to 5 for apps created after February 2026. The app owner needs Premium.
-- Development Mode also hides the track lists of playlists you don't own (the header shows and Play still works), search returns at most 10 results per type, and there is no artist top-tracks endpoint, so artist pages list albums instead.
-
 ## Memory
 
 Idle, offline release build (`CADENCE_OFFLINE=1`): 6.4 MB private working set, about 8 MB commit, about 8 threads.
@@ -78,6 +97,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\measure.ps1 -Minutes
 It attaches to the running app. In Task Manager, read the "Memory (active private working set)" column, not "Working set".
 
 Playback, release build, 10 min with the library open and a playlist playing (9 tracks, 100% DPI, 1200×780 window, measured with scripts\measure.ps1 on 2026-11-08): private working set min 17.4 MB, avg 25.2 MB, max 28.1 MB, final 23.3 MB; peak commit 31.5 MB; peak 21 threads. Flat over time, no growth across track changes.
+
+## Limits
+
+- New Spotify apps start in Development Mode. They are capped to a small allowlist of users until extended quota mode is approved. The cap was 25 users, and Spotify cut it to 5 for apps created after February 2026. The app owner needs Premium.
+- Development Mode also hides the track lists of playlists you don't own (the header shows and Play still works), search returns at most 10 results per type, and there is no artist top-tracks endpoint, so artist pages list albums instead.
 
 ## Legal
 
