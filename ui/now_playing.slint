@@ -31,7 +31,7 @@ export global Playback {
     in property <[LyricLine]> lyrics;
     in property <bool> lyrics-synced;
     in property <string> lyrics-note;
-    in-out property <bool> show-lyrics;
+    in-out property <bool> show-lyrics: true;
     callback play-pause();
     callback next();
     callback prev();
@@ -377,18 +377,11 @@ export component NowPlayingBar inherits Rectangle {
         spacing: Theme.space-xs;
         IconButton {
             commands: Icons.lyrics;
-            active: Playback.show-lyrics;
+            active: Playback.expanded;
             active-color: root.accent;
             enabled: !root.idle;
             clicked => {
-                if (Playback.show-lyrics && !Playback.expanded) {
-                    Playback.expanded = true;
-                } else {
-                    Playback.show-lyrics = !Playback.show-lyrics;
-                    if (Playback.show-lyrics) {
-                        Playback.expanded = true;
-                    }
-                }
+                Playback.expanded = !Playback.expanded;
             }
         }
         IconButton {
@@ -429,30 +422,29 @@ export component NowPlayingBar inherits Rectangle {
     }
 }
 
-// One lyric line. `state`: -1 sung, 0 current, 1 coming up, 2 plain (unsynced). Every line is heading
-// size and may wrap to two lines inside the fixed row height that ListView needs.
+// One lyric line. `state`: -1 sung, 0 current, 1 coming up, 2 plain (unsynced).
 component LyricRow inherits Rectangle {
     in property <LyricLine> line;
     in property <int> state;
     in property <bool> clickable;
     callback clicked;
-    height: root.line.text == "" ? 24px : 64px;
+    height: 76px;
     border-radius: Theme.radius-control;
     background: (root.clickable && touch.has-hover) ? Theme.hover : transparent;
     animate background { duration: Theme.duration-fast; easing: Theme.ease; }
 
     Text {
-        x: Theme.space-md;
+        x: Theme.space-sm;
         y: 0px;
-        width: parent.width - 2 * Theme.space-md;
+        width: parent.width - 2 * Theme.space-sm;
         height: parent.height;
         vertical-alignment: center;
         text: root.line.text;
         wrap: word-wrap;
         overflow: elide;
-        font-size: root.state == 0 ? 28px : 22px;
-        letter-spacing: root.state == 0 ? Theme.tracking-title : Theme.tracking-heading;
-        font-weight: root.state == 0 ? Theme.weight-bold : Theme.weight-semibold;
+        font-size: root.state == 0 ? 42px : 26px;
+        letter-spacing: root.state == 0 ? -0.6px : -0.3px;
+        font-weight: Theme.weight-bold;
         color: root.state == 0 ? #ffffff : root.state < 0 ? #ffffff.mix(transparent, 55%) : root.state == 1 ? #ffffff.mix(transparent, 68%) : #ffffff;
         animate font-size, color { duration: Theme.duration-fast; easing: Theme.ease; }
     }
@@ -463,23 +455,20 @@ component LyricRow inherits Rectangle {
     }
 }
 
-// Compact title line, then the lyrics. Synced lyrics follow `position-ms`: the current line is the
-// last one that has started, and the list scrolls it to about a third from the top. A manual scroll
-// pauses that for 3 s. With no lines, the note is shown instead.
+// Synced lyrics follow `position-ms`: the current line is vertically centered at the screen midpoint.
+// A manual scroll pauses auto-follow for 3 s.
 component LyricsPanel inherits Rectangle {
     property <int> n: Playback.lyrics.length;
     property <int> pos: Playback.position-ms;
     property <bool> synced: Playback.lyrics-synced;
     property <string> track: Playback.title;
     property <length> vh: list.visible-height;
-    property <length> row-h: 64px;
+    property <length> row-h: 76px;
     property <int> active: -1;
     property <int> probe: -1;
     property <bool> paused;
     property <duration> resume-at;
 
-    // Index of the last line whose start is <= position (-1 before the first): a binary descent,
-    // since Slint expressions have no loops. Handles up to 2047 lines.
     function locate() {
         if (!Playback.lyrics-synced || Playback.lyrics.length == 0) {
             root.active = -1;
@@ -500,12 +489,12 @@ component LyricsPanel inherits Rectangle {
         root.active = root.probe;
     }
 
-    // Put the current row's centre about a third of the way down the list.
+    // Exact vertical centering matching yoshik.xyz: scrollTarget = row.offsetTop + row.height / 2 - list.height / 2
     function follow() {
         if (root.paused || !Playback.lyrics-synced) {
             return;
         }
-        list.content-y = Math.clamp(root.vh * 0.4 - root.row-h / 2 - Math.max(root.active, 0) * root.row-h, Math.min(0px, root.vh - list.content-height), 0px);
+        list.content-y = root.vh / 2 - root.row-h / 2 - Math.max(root.active, 0) * root.row-h;
     }
 
     changed pos => { root.locate(); }
@@ -515,7 +504,6 @@ component LyricsPanel inherits Rectangle {
     }
     changed active => { root.follow(); }
     changed vh => { root.follow(); }
-    // New track or new lyrics: start from the top again.
     changed track => { root.restart(); }
     changed n => { root.restart(); }
     function restart() {
@@ -536,34 +524,11 @@ component LyricsPanel inherits Rectangle {
         }
     }
 
-    VerticalLayout {
-        x: Theme.space-md;
-        y: 0px;
-        width: parent.width - 2 * Theme.space-md;
-        height: 38px;
-        alignment: center;
-        spacing: 2px;
-        Text {
-            text: Playback.title;
-            color: Theme.text;
-            font-size: Theme.size-body;
-            font-weight: Theme.weight-semibold;
-            overflow: elide;
-        }
-        Text {
-            text: Playback.artist;
-            color: Theme.text-secondary;
-            font-size: Theme.size-caption;
-            letter-spacing: Theme.tracking-caption;
-            overflow: elide;
-        }
-    }
-
     list := ListView {
         x: 0px;
-        y: 46px;
+        y: 0px;
         width: parent.width;
-        height: parent.height - 46px;
+        height: parent.height;
         visible: root.n > 0;
         vertical-scrollbar-policy: ScrollBarPolicy.always-off;
         animate content-y { duration: Theme.duration-normal; easing: Theme.ease; }
@@ -581,36 +546,32 @@ component LyricsPanel inherits Rectangle {
             }
         }
     }
+
     Text {
         visible: root.n == 0;
         x: Theme.space-md;
-        y: 50px + Theme.space-sm;
+        y: (parent.height - self.height) / 2;
         width: parent.width - 2 * Theme.space-md;
+        horizontal-alignment: center;
         text: Playback.lyrics-note;
         color: Theme.text-secondary;
-        font-size: Theme.size-body;
+        font-size: Theme.size-heading;
         wrap: word-wrap;
     }
 }
 
-// Fills its parent. To show/hide it, animate its `opacity` (0 to 1, it hides itself below 1%) and
-// optionally `y` (e.g. 24px to 0) from the host. It swallows clicks so pages below stay inert.
+// Fullscreen Now Playing overlay: exact match to yoshik.xyz / lyrics overlay
 export component NowPlayingView inherits Rectangle {
     property <bool> idle: Playback.title == "";
     property <color> accent: Playback.accent;
-    property <color> top-tint: root.accent.mix(Theme.bg, 0.24);
-    property <length> margin: Theme.space-3xl;
-    property <length> gap: 48px;
-    property <length> art-size: Math.max(200px, Math.min(540px, Math.min(root.height - 100px, (root.width - 2 * root.margin - root.gap) * 0.42)));
-    property <length> col-w: Math.max(340px, Math.min(1000px, root.width - 2 * root.margin - root.gap - root.art-size));
-    property <length> group-x: (root.width - root.art-size - root.gap - root.col-w) / 2;
-    property <length> group-y: (root.height - root.art-size) / 2;
-    // Background colour at a given y, for the art's corner masks (the gradient is vertical).
-    property <color> bg-at-art-top: root.top-tint.mix(Theme.bg, 1 - Math.min(root.group-y / Math.max(root.height * 0.7, 1px), 1));
-    property <color> bg-at-art-bottom: root.top-tint.mix(Theme.bg, 1 - Math.min((root.group-y + root.art-size) / Math.max(root.height * 0.7, 1px), 1));
-    animate accent { duration: Theme.duration-normal; easing: Theme.ease; }
+    property <length> side-w: Math.max(260px, Math.min(520px, root.width * 0.36));
+    property <length> side-x: Math.max(36px, root.width * 0.06);
+    property <length> side-y: (root.height - (root.side-w + 80px)) / 2;
+
     visible: root.opacity > 0.01;
-    background: @linear-gradient(180deg, root.top-tint 0%, Theme.bg 70%);
+    // Ambient radial glow matching yoshik.xyz
+    background: @radial-gradient(circle, root.accent.mix(#000000, 0.40) 0%, root.accent.mix(#000000, 0.75) 50%, #08080a 100%);
+    animate accent { duration: Theme.duration-normal; easing: Theme.ease; }
 
     TouchArea { }
 
@@ -624,72 +585,111 @@ export component NowPlayingView inherits Rectangle {
         clicked => { Playback.expanded = false; }
     }
 
-    Cover {
-        x: root.group-x;
-        y: root.group-y;
-        width: root.art-size;
-        height: root.art-size;
-        source: Playback.art;
-        radius: Theme.radius-art;
-        backdrop: root.bg-at-art-top;
-        backdrop-bottom: root.bg-at-art-bottom;
-    }
-
-    // Right column, as tall as the art: the title block or the lyrics hang from its top edge (they
-    // cross-fade on `Playback.show-lyrics`). Controls live on the bottom bar only.
+    // Left column: Cover art, title, artist, progress bar (matches .lyrics-side)
     Rectangle {
-        x: root.group-x + root.art-size + root.gap;
-        y: root.group-y;
-        width: root.col-w;
-        height: root.art-size;
+        x: root.side-x;
+        y: root.side-y;
+        width: root.side-w;
+        height: root.side-w + 80px;
 
-        Rectangle {
+        Cover {
             x: 0px;
             y: 0px;
-            width: parent.width;
-            height: parent.height;
-            opacity: Playback.show-lyrics ? 0 : 1;
-            visible: self.opacity > 0.01;
-            animate opacity { duration: Theme.duration-fast; easing: Theme.ease; }
-            VerticalLayout {
-                alignment: center;
-                spacing: Theme.space-lg;
-                Text {
-                    text: Playback.album;
-                    color: Theme.text-secondary;
-                    font-size: Theme.size-heading;
-                    font-weight: Theme.weight-medium;
-                    overflow: elide;
-                }
-                Text {
-                    text: Playback.title;
-                    color: Theme.text;
-                    font-size: Playback.title.character-count > 18 ? Theme.size-title : Theme.size-display;
-                    font-weight: Theme.weight-bold;
-                    letter-spacing: Playback.title.character-count > 18 ? Theme.tracking-title : Theme.tracking-display;
-                    wrap: word-wrap;
-                    overflow: elide;
-                    height: Math.min(self.preferred-height, (Playback.title.character-count > 18 ? 3.1 : 2.1) * 1.3 * self.font-size);
-                }
-                Text {
-                    text: Playback.artist;
-                    color: Theme.text-secondary;
-                    font-size: Theme.size-title;
-                    font-weight: Theme.weight-medium;
-                    letter-spacing: Theme.tracking-title;
-                    overflow: elide;
+            width: root.side-w;
+            height: root.side-w;
+            source: Playback.art;
+            radius: 14px;
+            backdrop: root.accent.mix(#000000, 0.45);
+            backdrop-bottom: root.accent.mix(#000000, 0.65);
+        }
+
+        // Title under art
+        Text {
+            x: 0px;
+            y: root.side-w + 16px;
+            width: root.side-w;
+            height: 22px;
+            text: Playback.title;
+            color: #ffffff;
+            font-size: 17px;
+            font-weight: Theme.weight-bold;
+            overflow: elide;
+        }
+
+        // Artist under title
+        Text {
+            x: 0px;
+            y: root.side-w + 39px;
+            width: root.side-w;
+            height: 18px;
+            text: Playback.artist;
+            color: rgba(255, 255, 255, 0.55);
+            font-size: 14px;
+            font-weight: Theme.weight-medium;
+            overflow: elide;
+        }
+
+        // Progress bar under artist
+        Rectangle {
+            x: 0px;
+            y: root.side-w + 64px;
+            width: root.side-w;
+            height: 5px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.14);
+            clip: true;
+
+            Rectangle {
+                x: 0px;
+                y: 0px;
+                height: 100%;
+                border-radius: 999px;
+                background: rgba(255, 255, 255, 0.85);
+                width: Playback.duration-ms > 0 ? parent.width * Math.min(1.0, Math.max(0.0, Playback.position-ms / Playback.duration-ms)) : 0px;
+            }
+
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    if (Playback.duration-ms > 0) {
+                        Playback.seek(Math.floor(Math.clamp(self.mouse-x / parent.width, 0.0, 1.0) * Playback.duration-ms));
+                    }
                 }
             }
         }
+    }
+
+    // Right column: Full viewport height lyrics (matches .lyrics-lines)
+    Rectangle {
+        x: root.side-x + root.side-w + Math.max(36px, root.width * 0.05);
+        y: 0px;
+        width: root.width - self.x - root.side-x;
+        height: root.height;
+        clip: true;
 
         LyricsPanel {
             x: 0px;
             y: 0px;
             width: parent.width;
             height: parent.height;
-            opacity: Playback.show-lyrics ? 1 : 0;
-            visible: self.opacity > 0.01;
-            animate opacity { duration: Theme.duration-fast; easing: Theme.ease; }
+        }
+
+        // Soft top fade
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: 80px;
+            background: @linear-gradient(180deg, #08080a 0%, transparent 100%);
+        }
+
+        // Soft bottom fade
+        Rectangle {
+            x: 0px;
+            y: parent.height - 80px;
+            width: parent.width;
+            height: 80px;
+            background: @linear-gradient(0deg, #08080a 0%, transparent 100%);
         }
     }
 }

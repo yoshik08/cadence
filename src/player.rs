@@ -233,7 +233,12 @@ pub struct Lyrics {
 }
 
 impl Player {
-    /// Spotify color-lyrics first (via the librespot session), then LRCLIB. None when neither has any.
+    /// Exact lyrics pipeline matching yoshik.xyz / lyrics:
+    /// 1. Spotify internal color-lyrics via librespot session
+    /// 2. Clean title: remove (feat. ...), [feat. ...], (with ...), remasters, bonus tracks, suffixes
+    /// 3. LRCMUX API (https://api.lrcmux.dev/get with User-Agent: yoshik.xyz/lyrics)
+    /// 4. LRCLIB API (get + search fallback)
+    /// 5. Retry with raw title if different
     pub async fn lyrics(
         &self,
         uri: &str,
@@ -242,10 +247,39 @@ impl Player {
         album: &str,
         duration_ms: u32,
     ) -> Option<Lyrics> {
+        // 1. Spotify internal lyrics (Hermes spclient)
         if let Some(l) = self.spotify_lyrics(uri).await {
+            if l.synced && !l.lines.is_empty() {
+                return Some(l);
+            }
+        }
+
+        let cleaned = clean_title(title);
+
+        // 2. LRCMUX with cleaned title (primary yoshik.xyz lyrics provider)
+        if let Some(l) = lrcmux(&cleaned, artist, duration_ms).await {
             return Some(l);
         }
-        lrclib(title, artist, album, duration_ms).await
+
+        // 3. LRCLIB with cleaned title
+        if let Some(l) = lrclib(&cleaned, artist, album, duration_ms).await {
+            if l.synced {
+                return Some(l);
+            }
+        }
+
+        // 4. Retry with raw title if different
+        if cleaned != title {
+            if let Some(l) = lrcmux(title, artist, duration_ms).await {
+                return Some(l);
+            }
+            if let Some(l) = lrclib(title, artist, album, duration_ms).await {
+                return Some(l);
+            }
+        }
+
+        // Fallback: unsynced Spotify lyrics if any
+        self.spotify_lyrics(uri).await
     }
 
     async fn spotify_lyrics(&self, uri: &str) -> Option<Lyrics> {
@@ -268,36 +302,127 @@ fn http() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
-            .user_agent("Cadence/0.1 (desktop Spotify client)")
+            .user_agent("yoshik.xyz/lyrics")
             .build()
             .unwrap_or_default()
     })
 }
 
-async fn lrclib(title: &str, artist: &str, album: &str, duration_ms: u32) -> Option<Lyrics> {
-    let artist = artist.split(", ").next().unwrap_or(artist);
-    let secs = (duration_ms as f64 / 1000.0).round();
+/// Clean track titles matching cleanTitle() in yoshik.xyz/lyrics/api/lyrics.js
+fn clean_title(raw: &str) -> String {
+    let mut s = raw.to_string();
+    loop {
+        let prev = s.clone();
+        // Strip trailing brackets containing feat/ft/with/bonus/remaster
+        if let Some(start) = s.rfind(|c| c == '(' || c == '[') {
+            let close = if s.as_bytes()[start] == b'(' { ')' } else { ']' };
+            if let Some(end) = s[start..].find(close) {
+                let inner = s[start + 1..start + end].trim().to_lowercase();
+                if inner.starts_with("feat")
+                    || inner.starts_with("ft.")
+                    || inner.starts_with("ft ")
+                    || inner.starts_with("featuring")
+                    || inner.starts_with("with ")
+                    || inner.contains("remaster")
+                    || inner.contains("bonus")
+                {
+                    s = format!("{}{}", s[..start].trim_end(), &s[start + end + 1..]);
+                }
+            }
+        }
+        // Strip trailing "- bonus", "- remaster...", "- radio edit", "- single version", etc.
+        if let Some(idx) = s.rfind(" - ") {
+            let suffix = s[idx + 3..].trim().to_lowercase();
+            if suffix.contains("remaster")
+                || suffix.starts_with("bonus")
+                || suffix.starts_with("radio edit")
+                || suffix.starts_with("single version")
+                || suffix.starts_with("single edit")
+                || suffix.starts_with("explicit")
+            {
+                s.truncate(idx);
+            }
+        }
+        s = s.trim().to_string();
+        if s == prev {
+            break;
+        }
+    }
+    if s.is_empty() {
+        raw.to_string()
+    } else {
+        s
+    }
+}
+
+/// Query LRCMUX (https://api.lrcmux.dev/get) - the exact provider from yoshik.xyz/lyrics
+async fn lrcmux(title: &str, artist: &str, duration_ms: u32) -> Option<Lyrics> {
+    let primary_artist = artist.split(',').next().unwrap_or(artist).trim();
+    let secs = (duration_ms as f64 / 1000.0).round() as u64;
     let secs_s = secs.to_string();
     let r = http()
+        .get("https://api.lrcmux.dev/get")
+        .header("User-Agent", "yoshik.xyz/lyrics")
+        .query(&[
+            ("artist", primary_artist),
+            ("title", title),
+            ("duration", secs_s.as_str()),
+            ("level", "line"),
+            ("sources", "!kugou"),
+        ])
+        .timeout(Duration::from_secs(4))
+        .send()
+        .await
+        .ok()?;
+    if !r.status().is_success() {
+        return None;
+    }
+    let body = r.text().await.ok()?;
+    let v: Value = serde_json::from_str(&body).ok()?;
+    let lines_arr = v.get("lines")?.as_array()?;
+    if lines_arr.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(lines_arr.len());
+    for item in lines_arr {
+        let text = item.get("text").and_then(Value::as_str).unwrap_or("").trim();
+        let start = item.get("start").and_then(Value::as_u64).unwrap_or(0) as u32;
+        push_line(&mut lines, start, text);
+    }
+    (!lines.is_empty()).then_some(Lyrics {
+        synced: true,
+        lines,
+    })
+}
+
+async fn lrclib(title: &str, artist: &str, album: &str, duration_ms: u32) -> Option<Lyrics> {
+    let primary_artist = artist.split(',').next().unwrap_or(artist).trim();
+    let secs = (duration_ms as f64 / 1000.0).round();
+    let secs_s = (secs as u64).to_string();
+    let r = http()
         .get("https://lrclib.net/api/get")
+        .header("User-Agent", "yoshik.xyz/lyrics")
         .query(&[
             ("track_name", title),
-            ("artist_name", artist),
+            ("artist_name", primary_artist),
             ("album_name", album),
             ("duration", secs_s.as_str()),
         ])
+        .timeout(Duration::from_secs(4))
         .send()
         .await
         .ok()?;
     if r.status().is_success() {
-        return lrclib_item(&serde_json::from_str(&r.text().await.ok()?).ok()?);
+        if let Some(res) = lrclib_item(&serde_json::from_str(&r.text().await.ok()?).ok()?) {
+            return Some(res);
+        }
     }
-    if r.status() != reqwest::StatusCode::NOT_FOUND {
-        return None;
-    }
+    let search_q = format!("{title} {primary_artist}");
     let r = http()
         .get("https://lrclib.net/api/search")
-        .query(&[("track_name", title), ("artist_name", artist)])
+        .header("User-Agent", "yoshik.xyz/lyrics")
+        .query(&[("q", search_q.as_str())])
+        .timeout(Duration::from_secs(4))
         .send()
         .await
         .ok()?;
@@ -305,12 +430,11 @@ async fn lrclib(title: &str, artist: &str, album: &str, duration_ms: u32) -> Opt
         return None;
     }
     let v: Value = serde_json::from_str(&r.text().await.ok()?).ok()?;
-    // Results within +-3 s of the track length; prefer synced, then the closest duration.
     v.as_array()?
         .iter()
         .filter_map(|i| {
             let diff = (i.get("duration")?.as_f64()? - secs).abs();
-            (diff <= 3.0).then_some(())?;
+            (diff <= 4.0).then_some(())?;
             lrclib_item(i).map(|l| (l, diff))
         })
         .min_by(|a, b| {
