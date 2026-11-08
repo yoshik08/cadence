@@ -418,13 +418,13 @@ fn strip_diacritic(ch: char) -> char {
 
 /// Port of firstSigWord() in yoshik.xyz/api/lyrics.js: first word that is not the/a/an.
 fn first_sig_word(s: &str) -> String {
-    let words: Vec<&str> = norm(s).split_whitespace().collect();
-    for w in &words {
-        if !matches!(*w, "the" | "a" | "an") {
+    let normed = norm(s);
+    for w in normed.split_whitespace() {
+        if !matches!(w, "the" | "a" | "an") {
             return w.to_string();
         }
     }
-    words.first().map(|w| w.to_string()).unwrap_or_default()
+    normed.split_whitespace().next().map(|w| w.to_string()).unwrap_or_default()
 }
 
 /// Port of cleanTitle() in yoshik.xyz/api/lyrics.js.
@@ -864,7 +864,7 @@ fn parse_yrc(yrc: &str) -> Vec<LyricLine> {
             .collect::<Vec<_>>()
             .join(" ");
         let text_words: Vec<&str> = text.split_whitespace().collect();
-        let mut starts: Vec<u32> = words.iter().map(|w| w.1).collect();
+        let starts: Vec<u32> = words.iter().map(|w| w.1).collect();
         let mut ends_out: Vec<u32> = words.iter().map(|w| w.2).collect();
         for i in 0..ends_out.len() {
             if ends_out[i] <= starts[i] {

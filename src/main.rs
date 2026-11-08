@@ -117,8 +117,8 @@ fn describe(ev: &Event) -> String {
     }
 }
 
-/// Last fetched lyrics + track duration, so a window resize can re-split the word-mode
-/// rows for the new width without re-fetching. UI thread only.
+// Last fetched lyrics + track duration, so a window resize can re-split the word-mode
+// rows for the new width without re-fetching. UI thread only.
 thread_local! {
     static LAST_LYRICS: RefCell<Option<(player::Lyrics, u32)>> = const { RefCell::new(None) };
 }
@@ -147,8 +147,8 @@ fn lyric_row_budget(ui: &MainWindow) -> usize {
 fn build_lyric_words(
     line: &player::LyricLine,
     budget: usize,
-) -> (slint::ModelRc<slint::VecModel<LyricWord>>, i32) {
-    let empty = || (std::rc::Rc::new(slint::VecModel::default()).into(), 1);
+) -> (slint::ModelRc<LyricWord>, i32) {
+    let empty = || (std::rc::Rc::new(slint::VecModel::<LyricWord>::default()).into(), 1);
     let text_words: Vec<&str> = line.text.split_whitespace().collect();
     if line.words.len() != text_words.len() || line.words.is_empty() {
         return empty();
