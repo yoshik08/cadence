@@ -1,0 +1,683 @@
+// Cadence browsing UI: sidebar, Home, Search and list pages (playlist / album / artist / Liked Songs).
+// Everything here is driven by `Browse`; src/browse.rs fills the models and answers the callbacks.
+import { Theme } from "theme.slint";
+import { Cover } from "cover.slint";
+import { ScrollView, ListView, Palette } from "std-widgets.slint";
+
+export struct Card {
+    title: string,
+    subtitle: string,
+    uri: string,
+    art: image,
+    liked: bool,
+}
+
+export struct TrackRow {
+    title: string,
+    artist: string,
+    album: string,
+    duration: string,
+    uri: string,
+}
+
+export global Browse {
+    // "home" | "search" | "list". Rust owns it; every navigation also toggles `flip` so that a
+    // list opened from a list still replays the page transition.
+    in-out property <string> page: "home";
+    in property <bool> flip;
+    in property <bool> loading;
+    in property <string> error;
+    // One quiet line while the page has nothing to show yet ("Loading your library…", sign-in
+    // progress). Empty hides it. Plain property, so it renders even before browse::init runs.
+    in property <string> status;
+    in property <string> current-uri;
+    in property <color> accent: Theme.accent;
+
+    // Home
+    in property <[Card]> recent;
+    in property <[Card]> playlists;
+
+    // Search
+    in property <[TrackRow]> found-tracks;
+    in property <[Card]> found-artists;
+    in property <[Card]> found-albums;
+    in property <[Card]> found-playlists;
+    in property <string> search-note;
+
+    // List ("playlist" | "album" | "artist" | "liked")
+    in property <string> list-kind;
+    in property <string> list-uri;
+    in property <string> list-title;
+    in property <string> list-meta;
+    in property <string> list-note;
+    in property <image> list-art;
+    in property <[TrackRow]> tracks;
+
+    callback open(string);
+    callback search(string);
+    callback play(string, int);
+    callback go-home();
+    callback go-search();
+}
+
+component Label inherits Text {
+    font-family: Theme.font-family;
+    font-size: Theme.size-body;
+    font-weight: Theme.weight-regular;
+    color: Theme.text;
+    overflow: elide;
+    min-width: 0px;
+}
+
+// Fades and lifts a page in when it is created. Reading opacity and y in init forces the first
+// evaluation, so that flipping `shown` afterwards animates instead of jumping.
+component PageFade inherits Rectangle {
+    property <bool> shown: false;
+    width: 100%;
+    height: 100%;
+    opacity: root.shown ? 1 : 0;
+    y: root.shown ? 0px : Theme.space-lg;
+    animate opacity { duration: Theme.duration-normal; easing: Theme.ease; }
+    animate y { duration: Theme.duration-normal; easing: Theme.ease; }
+    init => {
+        if (root.opacity < 1 && root.y >= 0px) {
+            root.shown = true;
+        }
+    }
+    @children
+}
+
+// Rounded art (Cover cuts the corners in the `backdrop` colour, so it must match what is behind
+// the tile) with a quiet placeholder; the heart marks Liked Songs.
+component ArtTile inherits Rectangle {
+    in property <image> source;
+    in property <length> radius;
+    in property <color> backdrop: Theme.bg;
+    in property <bool> liked;
+    in property <bool> hovered;
+    in property <bool> pressed;
+    Cover {
+        width: parent.width;
+        height: parent.height;
+        source: root.source;
+        radius: root.radius;
+        backdrop: root.backdrop;
+        background: Theme.surface-raised;
+    }
+    if root.liked : Path {
+        width: parent.width * 0.38;
+        height: parent.height * 0.38;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        fill: Browse.accent;
+        commands: "M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z";
+    }
+    Rectangle {
+        border-radius: root.radius;
+        background: root.pressed ? Theme.pressed : (root.hovered ? Theme.hover : transparent);
+        animate background { duration: Theme.duration-fast; }
+    }
+}
+
+component SectionTitle inherits HorizontalLayout {
+    in property <string> title;
+    padding-left: Theme.space-2xl;
+    padding-right: Theme.space-2xl;
+    Label {
+        text: root.title;
+        font-size: Theme.size-heading;
+        font-weight: Theme.weight-semibold;
+        letter-spacing: Theme.tracking-heading;
+    }
+}
+
+component Section inherits VerticalLayout {
+    in property <string> title;
+    spacing: Theme.space-md;
+    alignment: start;
+    SectionTitle { title: root.title; }
+    @children
+}
+
+component CardView inherits Rectangle {
+    in property <Card> card;
+    in property <bool> round;
+    in property <length> art-size: 160px;
+    callback clicked();
+    width: root.art-size;
+    height: root.art-size + 40px;
+    VerticalLayout {
+        spacing: 0;
+        ArtTile {
+            width: root.art-size;
+            height: root.art-size;
+            radius: root.round ? root.art-size / 2 : Theme.radius-art;
+            source: root.card.art;
+            hovered: ta.has-hover;
+            pressed: ta.pressed;
+        }
+        Rectangle { height: Theme.space-xs; }
+        Label {
+            text: root.card.title;
+            font-weight: Theme.weight-medium;
+            horizontal-alignment: root.round ? center : left;
+        }
+        Label {
+            text: root.card.subtitle;
+            font-size: Theme.size-caption;
+            letter-spacing: Theme.tracking-caption;
+            color: Theme.text-secondary;
+            horizontal-alignment: root.round ? center : left;
+        }
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// Horizontal shelf. Sideways wheel / trackpad input scrolls it through the TouchArea under the
+// cards; vertical input is rejected so the page keeps scrolling. Dragging also pans.
+component Shelf inherits Rectangle {
+    in property <[Card]> model;
+    in property <bool> round;
+    in property <length> art-size: 160px;
+    in property <length> lead: Theme.space-2xl;
+    callback picked(string);
+    height: root.art-size + 40px;
+    TouchArea {
+        scroll-event(e) => {
+            if (abs(e.delta-y) > abs(e.delta-x)) {
+                return reject;
+            }
+            flick.content-x = max(flick.width - flick.content-width, min(0px, flick.content-x + e.delta-x));
+            return accept;
+        }
+    }
+    flick := Flickable {
+        content-width: root.lead * 2 + root.model.length * (root.art-size + Theme.space-lg) - Theme.space-lg;
+        content-height: root.height;
+        for c[i] in root.model : CardView {
+            x: root.lead + i * (root.art-size + Theme.space-lg);
+            card: c;
+            round: root.round;
+            art-size: root.art-size;
+            clicked => { root.picked(c.uri); }
+        }
+    }
+}
+
+// One row of a track list. Columns are placed by hand so every row lines up and the album
+// column can disappear on narrow windows.
+component TrackItem inherits Rectangle {
+    in property <TrackRow> item;
+    in property <int> index;
+    callback clicked();
+    height: 48px;
+
+    property <bool> playing: root.item.uri != "" && root.item.uri == Browse.current-uri;
+    property <bool> wide: root.width >= 820px;
+    property <length> pad: Theme.space-lg;
+    property <length> idx-w: 28px;
+    property <length> dur-w: 56px;
+    property <length> gap: Theme.space-lg;
+    property <length> inner-w: root.width - 2 * Theme.space-lg;
+    property <length> avail: inner-w - 2 * pad - idx-w - dur-w - (wide ? 4 : 3) * gap;
+    property <length> title-w: avail * (wide ? 0.40 : 0.58);
+    property <length> artist-w: avail * (wide ? 0.30 : 0.42);
+    property <length> album-w: avail * 0.30;
+    property <length> title-x: Theme.space-lg + pad + idx-w + gap;
+    property <length> artist-x: title-x + title-w + gap;
+    property <length> album-x: artist-x + artist-w + gap;
+
+    Rectangle {
+        x: Theme.space-lg;
+        width: root.inner-w;
+        border-radius: Theme.radius-control;
+        background: ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent);
+        animate background { duration: Theme.duration-fast; }
+    }
+    if !root.playing : Label {
+        x: Theme.space-lg + root.pad;
+        width: root.idx-w;
+        y: (parent.height - self.height) / 2;
+        text: "\{root.index + 1}";
+        color: Theme.text-tertiary;
+        horizontal-alignment: left;
+    }
+    if root.playing : Rectangle {
+        x: Theme.space-lg + root.pad;
+        y: (parent.height - 12px) / 2;
+        width: 12px;
+        height: 12px;
+        Rectangle { x: 0px; y: 4px; width: 2px; height: 8px; background: Browse.accent; border-radius: 1px; }
+        Rectangle { x: 5px; y: 0px; width: 2px; height: 12px; background: Browse.accent; border-radius: 1px; }
+        Rectangle { x: 10px; y: 6px; width: 2px; height: 6px; background: Browse.accent; border-radius: 1px; }
+    }
+    Label {
+        x: root.title-x;
+        width: root.title-w;
+        y: (parent.height - self.height) / 2;
+        text: root.item.title;
+        font-weight: Theme.weight-medium;
+        color: root.playing ? Browse.accent : Theme.text;
+    }
+    Label {
+        x: root.artist-x;
+        width: root.artist-w;
+        y: (parent.height - self.height) / 2;
+        text: root.item.artist;
+        color: Theme.text-secondary;
+    }
+    if root.wide : Label {
+        x: root.album-x;
+        width: root.album-w;
+        y: (parent.height - self.height) / 2;
+        text: root.item.album;
+        color: Theme.text-tertiary;
+    }
+    Label {
+        x: root.width - Theme.space-lg - root.pad - root.dur-w;
+        width: root.dur-w;
+        y: (parent.height - self.height) / 2;
+        text: root.item.duration;
+        color: Theme.text-tertiary;
+        horizontal-alignment: right;
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// Playlist row on Home. Art is loaded lazily by the Rust model, only for rows that get instantiated.
+component PlaylistRow inherits Rectangle {
+    in property <Card> card;
+    callback clicked();
+    height: 72px;
+
+    // What the hover / pressed tint looks like over the page (alpha 0.06 / 0.12 of text over bg),
+    // so the thumbnail's corner masks blend in.
+    property <color> behind-thumb: ta.pressed ? Theme.text.mix(Theme.bg, 0.12) : (ta.has-hover ? Theme.text.mix(Theme.bg, 0.06) : Theme.bg);
+    animate behind-thumb { duration: Theme.duration-fast; }
+
+    Rectangle {
+        x: Theme.space-xl;
+        width: parent.width - 2 * Theme.space-xl;
+        border-radius: Theme.radius-control;
+        background: ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent);
+        animate background { duration: Theme.duration-fast; }
+    }
+    ArtTile {
+        x: Theme.space-xl + Theme.space-sm;
+        y: Theme.space-sm;
+        width: 56px;
+        height: 56px;
+        radius: Theme.radius-thumb;
+        backdrop: root.behind-thumb;
+        source: root.card.art;
+        liked: root.card.liked;
+    }
+    VerticalLayout {
+        x: Theme.space-xl + Theme.space-sm + 56px + Theme.space-lg;
+        width: parent.width - self.x - Theme.space-xl - Theme.space-lg;
+        height: parent.height;
+        alignment: center;
+        spacing: 2px;
+        Label {
+            text: root.card.title;
+            font-weight: Theme.weight-medium;
+        }
+        Label {
+            text: root.card.subtitle;
+            font-size: Theme.size-caption;
+            letter-spacing: Theme.tracking-caption;
+            color: Theme.text-secondary;
+        }
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+    height: 40px;
+    border-radius: Theme.radius-control;
+    background: ta.pressed ? Theme.pressed : (root.selected ? Theme.surface-raised : (ta.has-hover ? Theme.hover : transparent));
+    animate background { duration: Theme.duration-fast; }
+    Label {
+        x: Theme.space-md;
+        y: (parent.height - self.height) / 2;
+        width: parent.width - 2 * Theme.space-md;
+        text: root.label;
+        font-weight: Theme.weight-medium;
+        color: root.selected ? Theme.text : Theme.text-secondary;
+        animate color { duration: Theme.duration-fast; }
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// Fixed 216 px wide.
+export component Sidebar inherits Rectangle {
+    width: 216px;
+    background: Theme.bg;
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.divider;
+    }
+    VerticalLayout {
+        padding: Theme.space-md;
+        padding-top: Theme.space-xl;
+        spacing: Theme.space-xs;
+        HorizontalLayout {
+            height: 40px;
+            padding-left: Theme.space-md;
+            Label {
+                text: "Cadence";
+                font-size: Theme.size-heading;
+                font-weight: Theme.weight-bold;
+                letter-spacing: Theme.tracking-heading;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle { height: Theme.space-md; }
+        NavItem {
+            label: "Home";
+            selected: Browse.page == "home";
+            clicked => { Browse.go-home(); }
+        }
+        NavItem {
+            label: "Search";
+            selected: Browse.page == "search";
+            clicked => { Browse.go-search(); }
+        }
+        NavItem {
+            label: "Liked Songs";
+            selected: Browse.page == "list" && Browse.list-kind == "liked";
+            clicked => { Browse.open("liked"); }
+        }
+        Rectangle { vertical-stretch: 1; }
+    }
+}
+
+// Display-size page title with the optional status line under it. Every page uses it so the
+// title line sits at the same y.
+component PageTitle inherits VerticalLayout {
+    in property <string> title;
+    in property <string> status;
+    padding-top: Theme.space-xl;
+    padding-left: Theme.space-2xl;
+    padding-right: Theme.space-2xl;
+    padding-bottom: Theme.space-xl;
+    spacing: Theme.space-xs;
+    vertical-stretch: 0;
+    Label {
+        text: root.title;
+        font-size: Theme.size-display;
+        font-weight: Theme.weight-bold;
+        letter-spacing: Theme.tracking-display;
+    }
+    if root.status != "" : Label {
+        text: root.status;
+        color: Theme.text-secondary;
+    }
+}
+
+component HomePage inherits PageFade {
+    VerticalLayout {
+        spacing: 0;
+        PageTitle {
+            title: "Home";
+            status: Browse.status;
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            opacity: Browse.loading ? 0.5 : 1;
+            animate opacity { duration: Theme.duration-normal; easing: Theme.ease; }
+            VerticalLayout {
+                spacing: 0;
+                if Browse.recent.length > 0 : Section {
+                    title: "Recently played";
+                    vertical-stretch: 0;
+                    Shelf {
+                        art-size: 120px;
+                        model: Browse.recent;
+                        picked(uri) => { Browse.open(uri); }
+                    }
+                }
+                if Browse.recent.length > 0 : Rectangle { height: Theme.space-xl; vertical-stretch: 0; }
+                if Browse.playlists.length > 0 : SectionTitle {
+                    title: "Your playlists";
+                    vertical-stretch: 0;
+                }
+                if Browse.playlists.length > 0 : Rectangle { height: Theme.space-md; vertical-stretch: 0; }
+                ListView {
+                    vertical-stretch: 1;
+                    for card in Browse.playlists : PlaylistRow {
+                        card: card;
+                        clicked => { Browse.open(card.uri); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component SearchPage inherits PageFade {
+    // Status (searching, signing in) and the no-results note share one line under the field.
+    property <string> line: Browse.status != "" ? Browse.status : Browse.search-note;
+    VerticalLayout {
+        spacing: 0;
+        PageTitle { title: "Search"; }
+        HorizontalLayout {
+            padding-left: Theme.space-2xl;
+            padding-right: Theme.space-2xl;
+            Rectangle {
+                height: 56px;
+                border-radius: Theme.radius-control;
+                background: Theme.surface;
+                Label {
+                    x: Theme.space-lg;
+                    y: 0px;
+                    width: parent.width - 2 * Theme.space-lg;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: "Search songs, artists, albums";
+                    font-size: Theme.size-heading;
+                    letter-spacing: Theme.tracking-heading;
+                    color: Theme.text-tertiary;
+                    visible: input.text == "";
+                }
+                input := TextInput {
+                    init => { self.focus(); }
+                    x: Theme.space-lg;
+                    y: 0px;
+                    width: parent.width - 2 * Theme.space-lg;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    font-family: Theme.font-family;
+                    font-size: Theme.size-heading;
+                    letter-spacing: Theme.tracking-heading;
+                    color: Theme.text;
+                    selection-background-color: Browse.accent;
+                    selection-foreground-color: Theme.on-accent;
+                    single-line: true;
+                    edited => { Browse.search(self.text); }
+                    accepted => { Browse.search(self.text); }
+                }
+            }
+        }
+        Rectangle { height: Theme.space-xl; vertical-stretch: 0; }
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: Theme.space-2xl;
+                padding-bottom: Theme.space-2xl;
+                opacity: Browse.loading ? 0.5 : 1;
+                animate opacity { duration: Theme.duration-normal; easing: Theme.ease; }
+                if root.line != "" : HorizontalLayout {
+                    padding-left: Theme.space-2xl;
+                    Label {
+                        text: root.line;
+                        color: Theme.text-secondary;
+                    }
+                }
+                if Browse.found-tracks.length > 0 : Section {
+                    title: "Tracks";
+                    VerticalLayout {
+                        for t[i] in Browse.found-tracks : TrackItem {
+                            item: t;
+                            index: i;
+                            clicked => { Browse.play(t.uri, 0); }
+                        }
+                    }
+                }
+                if Browse.found-artists.length > 0 : Section {
+                    title: "Artists";
+                    Shelf {
+                        model: Browse.found-artists;
+                        round: true;
+                        picked(uri) => { Browse.open(uri); }
+                    }
+                }
+                if Browse.found-albums.length > 0 : Section {
+                    title: "Albums";
+                    Shelf {
+                        model: Browse.found-albums;
+                        picked(uri) => { Browse.open(uri); }
+                    }
+                }
+                if Browse.found-playlists.length > 0 : Section {
+                    title: "Playlists";
+                    Shelf {
+                        model: Browse.found-playlists;
+                        picked(uri) => { Browse.open(uri); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ListPage inherits PageFade {
+    property <bool> is-artist: Browse.list-kind == "artist";
+    property <length> art-size: 232px;
+    property <string> line: Browse.status != "" ? Browse.status : Browse.list-note;
+    VerticalLayout {
+        HorizontalLayout {
+            padding: Theme.space-2xl;
+            padding-bottom: Theme.space-xl;
+            spacing: Theme.space-xl;
+            ArtTile {
+                width: root.art-size;
+                height: root.art-size;
+                radius: root.is-artist ? root.art-size / 2 : Theme.radius-art;
+                source: Browse.list-art;
+                liked: Browse.list-kind == "liked";
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: end;
+                spacing: Theme.space-sm;
+                Label {
+                    text: Browse.list-kind == "album" ? "Album" : (root.is-artist ? "Artist" : "Playlist");
+                    color: Theme.text-secondary;
+                    font-weight: Theme.weight-medium;
+                }
+                Label {
+                    text: Browse.list-title;
+                    font-size: Theme.size-display;
+                    font-weight: Theme.weight-bold;
+                    letter-spacing: Theme.tracking-display;
+                }
+                Label {
+                    text: Browse.list-meta;
+                    color: Theme.text-secondary;
+                }
+                Rectangle { height: Theme.space-sm; }
+                HorizontalLayout {
+                    alignment: start;
+                    Rectangle {
+                        width: 112px;
+                        height: 44px;
+                        border-radius: Theme.radius-control;
+                        background: play-ta.pressed ? Theme.text-secondary : (play-ta.has-hover ? #ffffff : Theme.text);
+                        animate background { duration: Theme.duration-fast; }
+                        Label {
+                            width: parent.width;
+                            y: (parent.height - self.height) / 2;
+                            text: "Play";
+                            horizontal-alignment: center;
+                            font-weight: Theme.weight-semibold;
+                            color: Theme.bg;
+                        }
+                        play-ta := TouchArea {
+                            clicked => { Browse.play(Browse.list-uri, 0); }
+                        }
+                    }
+                }
+            }
+        }
+        if root.line != "" : HorizontalLayout {
+            padding-left: Theme.space-2xl;
+            padding-right: Theme.space-2xl;
+            Label {
+                text: root.line;
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+                overflow: clip;
+            }
+        }
+        ListView {
+            vertical-stretch: 1;
+            opacity: Browse.loading ? 0.5 : 1;
+            animate opacity { duration: Theme.duration-normal; easing: Theme.ease; }
+            for t[i] in Browse.tracks : TrackItem {
+                item: t;
+                index: i;
+                clicked => {
+                    if (root.is-artist) {
+                        Browse.open(t.uri);
+                    } else {
+                        Browse.play(Browse.list-uri, i);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Fills its parent; leave the bottom to the now-playing bar.
+export component BrowseArea inherits Rectangle {
+    background: Theme.bg;
+    clip: true;
+    init => { Palette.color-scheme = ColorScheme.dark; }
+
+    property <length> error-h: Browse.error != "" ? 36px : 0px;
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height - root.error-h;
+        if Browse.page == "home" : HomePage { }
+        if Browse.page == "search" : SearchPage { }
+        if Browse.page == "list" && !Browse.flip : ListPage { }
+        if Browse.page == "list" && Browse.flip : ListPage { }
+    }
+    if Browse.error != "" : Label {
+        x: Theme.space-2xl;
+        y: parent.height - root.error-h;
+        width: parent.width - 2 * Theme.space-2xl;
+        height: root.error-h;
+        text: Browse.error;
+        color: Theme.text-secondary;
+        vertical-alignment: center;
+    }
+}

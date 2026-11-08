@@ -1,0 +1,695 @@
+// Now playing: the `Playback` state global (Rust writes it, the UI reads it), the bottom bar and
+// the expanded view. Rust sets `position-ms` on player events; the bar's Timer only interpolates
+// between events. Nothing here takes keyboard focus.
+import { Theme } from "theme.slint";
+import { Cover } from "cover.slint";
+import { ListView } from "std-widgets.slint";
+
+export struct LyricLine {
+    text: string,
+    start-ms: int,
+    end-ms: int,
+}
+
+export global Playback {
+    in-out property <string> title;
+    in-out property <string> artist;
+    in-out property <string> album;
+    in-out property <image> art;
+    // Optional extra: a 56px-sized copy for the bar (crisper than scaling `art` down). Unset, the bar uses `art`.
+    in-out property <image> bar-art;
+    in-out property <color> accent: Theme.accent;
+    in-out property <int> position-ms;
+    in-out property <int> duration-ms;
+    in-out property <bool> playing;
+    in-out property <bool> shuffle;
+    in-out property <bool> repeat;
+    in-out property <float> volume: 0.6;
+    in-out property <bool> expanded;
+    // Lyrics (Rust fills `lyrics`; `end-ms` is the next line's start, the last line's the duration).
+    // `lyrics-note` is "" while lines exist, otherwise a one-line status. `show-lyrics` is the toggle.
+    in property <[LyricLine]> lyrics;
+    in property <bool> lyrics-synced;
+    in property <string> lyrics-note;
+    in-out property <bool> show-lyrics;
+    callback play-pause();
+    callback next();
+    callback prev();
+    callback seek(int);
+    callback set-volume(float);
+    callback toggle-shuffle();
+    callback toggle-repeat();
+}
+
+// Icons on a 24 grid. Transport glyphs are solid with a 2px round-joined outline (so the corners
+// are soft); everything else is a 1.75px round-capped stroke.
+global Icons {
+    out property <string> play: "M8 5.5 L8 18.5 L19 12 Z";
+    out property <string> pause: "M7.5 6 H10.5 V18 H7.5 Z M13.5 6 H16.5 V18 H13.5 Z";
+    out property <string> prev: "M5 6.5 H6.5 V17.5 H5 Z M19 6.5 L11 12 L19 17.5 Z";
+    out property <string> next: "M19 6.5 H17.5 V17.5 H19 Z M5 6.5 L13 12 L5 17.5 Z";
+    out property <string> shuffle: "M3 7 H6 C11 7 13 17 18 17 H20.5 M18.5 14.5 L21 17 L18.5 19.5 M3 17 H6 C7.6 17 8.8 16.4 9.7 15.3 M14.3 8.7 C15.2 7.6 16.4 7 18 7 H20.5 M18.5 4.5 L21 7 L18.5 9.5";
+    out property <string> repeat: "M4 12 V10 C4 7.8 5.8 6 8 6 H20 M17 3 L20 6 L17 9 M20 12 V14 C20 16.2 18.2 18 16 18 H4 M7 15 L4 18 L7 21";
+    // A speech bubble with two text lines.
+    out property <string> lyrics: "M6 4.5 H18 C19.4 4.5 20.5 5.6 20.5 7 V14 C20.5 15.4 19.4 16.5 18 16.5 H11 L7 20 V16.5 H6 C4.6 16.5 3.5 15.4 3.5 14 V7 C3.5 5.6 4.6 4.5 6 4.5 Z M8 9 H16 M8 12 H13";
+    out property <string> chevron-up: "M6 15 L12 9 L18 15";
+    out property <string> chevron-down: "M6 9 L12 15 L18 9";
+    out property <string> volume-mute: "M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z M16 9.5 L21 14.5 M21 9.5 L16 14.5";
+    out property <string> volume-low: "M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z M15.5 9.2 A4 4 0 0 1 15.5 14.8";
+    out property <string> volume-high: "M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z M15.5 9.2 A4 4 0 0 1 15.5 14.8 M18.2 6.8 A8 8 0 0 1 18.2 17.2";
+}
+
+global Fmt {
+    public pure function two(n: int) -> string {
+        return n < 10 ? "0\{n}" : "\{n}";
+    }
+    // m:ss
+    public pure function mmss(ms: int) -> string {
+        return "\{Math.floor(Math.max(ms, 0) / 60000)}:\{two(Math.mod(Math.floor(Math.max(ms, 0) / 1000), 60))}";
+    }
+}
+
+component Icon inherits Path {
+    in property <length> size: 20px;
+    in property <bool> solid;
+    in property <color> tint: Theme.text;
+    width: root.size;
+    height: root.size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: root.solid ? root.tint : transparent;
+    stroke: root.tint;
+    stroke-width: (root.solid ? 2px : 1.75px) * (root.size / 24px);
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    animate fill, stroke { duration: Theme.duration-fast; easing: Theme.ease; }
+}
+
+// Quiet icon button: hover and press tint the background, hover brightens the glyph.
+component IconButton inherits Rectangle {
+    in property <string> commands;
+    in property <length> icon-size: 20px;
+    in property <bool> solid;
+    in property <bool> active;
+    in property <color> active-color: Theme.accent;
+    in property <bool> enabled: true;
+    callback clicked;
+    width: 36px;
+    height: 36px;
+    border-radius: Theme.radius-control;
+    opacity: root.enabled ? 1 : 0.35;
+    background: !root.enabled ? transparent : touch.pressed ? Theme.pressed : touch.has-hover ? Theme.hover : transparent;
+    animate background { duration: Theme.duration-fast; easing: Theme.ease; }
+
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        size: root.icon-size;
+        solid: root.solid;
+        commands: root.commands;
+        tint: root.active ? root.active-color : (touch.has-hover && root.enabled) ? Theme.text : Theme.text-secondary;
+    }
+    // A dot under toggled icons, so state does not rely on colour alone.
+    Rectangle {
+        visible: root.active;
+        width: 4px;
+        height: 4px;
+        border-radius: 2px;
+        background: root.active-color;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height + root.icon-size) / 2 + 2px;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// The one prominent control: a near-white disc.
+component PlayButton inherits Rectangle {
+    in property <length> diameter: 44px;
+    in property <bool> enabled: true;
+    callback clicked;
+    width: root.diameter;
+    height: root.diameter;
+    border-radius: root.diameter / 2;
+    opacity: root.enabled ? 1 : 0.35;
+    background: (touch.pressed && root.enabled) ? Theme.text-secondary : (touch.has-hover && root.enabled) ? #ffffff : Theme.text;
+    animate background { duration: Theme.duration-fast; easing: Theme.ease; }
+
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        size: root.diameter * 0.5;
+        solid: true;
+        tint: Theme.bg;
+        commands: Playback.playing ? Icons.pause : Icons.play;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Thin slider. While pressed it shows the drag position; `live` fires on every change of the
+// drag, `released` once at the end (also for a plain click). `value` is 0..1.
+component Scrubber inherits Rectangle {
+    in property <float> value;
+    in property <color> fill-color: Theme.accent;
+    in property <bool> enabled: true;
+    out property <bool> dragging: touch.pressed;
+    out property <float> shown: touch.pressed ? root.drag : Math.clamp(root.value, 0, 1);
+    callback live(float);
+    callback released(float);
+    property <float> drag;
+    property <bool> hot: root.enabled && (touch.has-hover || touch.pressed);
+    height: 20px;
+    opacity: root.enabled ? 1 : 0.35;
+
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.track;
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width * root.shown;
+            height: 100%;
+            border-radius: 2px;
+            background: root.fill-color;
+        }
+    }
+    Rectangle {
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: #ffffff;
+        x: root.width * root.shown - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        opacity: root.hot ? 1 : 0;
+        animate opacity { duration: Theme.duration-fast; easing: Theme.ease; }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.left) {
+                if (e.kind == PointerEventKind.down) {
+                    root.drag = Math.clamp(self.mouse-x / self.width, 0, 1);
+                    root.live(root.drag);
+                } else if (e.kind == PointerEventKind.up) {
+                    root.released(root.drag);
+                }
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.drag = Math.clamp(self.mouse-x / self.width, 0, 1);
+                root.live(root.drag);
+            }
+        }
+    }
+}
+
+// 88px tall, any width. Keep exactly one instance alive: it owns the position Timer.
+export component NowPlayingBar inherits Rectangle {
+    property <bool> idle: Playback.title == "";
+    property <color> accent: Playback.accent;
+    property <length> centre-w: Math.min(520px, root.width * 0.42);
+    property <length> side-w: (root.width - root.centre-w) / 2 - 2 * Theme.space-xl;
+    property <float> saved-volume: 0.6;
+    property <int> last-sent: -1;
+    animate accent { duration: Theme.duration-normal; easing: Theme.ease; }
+    height: 88px;
+    background: Theme.bg;
+
+    Timer {
+        interval: 500ms;
+        running: Playback.playing && Playback.duration-ms > 0;
+        triggered => {
+            Playback.position-ms = Math.min(Playback.position-ms + 500, Playback.duration-ms);
+        }
+    }
+
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.divider;
+    }
+
+    // Left: art and track, click opens the full view.
+    Rectangle {
+        x: Theme.space-xl;
+        y: (root.height - self.height) / 2;
+        width: root.side-w;
+        height: 56px;
+        Cover {
+            x: 0;
+            y: 0;
+            width: 56px;
+            height: 56px;
+            source: Playback.bar-art.width > 0 ? Playback.bar-art : Playback.art;
+            radius: Theme.radius-thumb;
+            backdrop: Theme.bg;
+        }
+        VerticalLayout {
+            x: 56px + Theme.space-md + 2px;
+            width: parent.width - self.x;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: Playback.title;
+                color: Theme.text;
+                font-size: Theme.size-body;
+                font-weight: Theme.weight-semibold;
+                overflow: elide;
+            }
+            Text {
+                text: Playback.artist;
+                color: Theme.text-secondary;
+                font-size: Theme.size-caption;
+                letter-spacing: Theme.tracking-caption;
+                overflow: elide;
+            }
+        }
+        TouchArea {
+            enabled: !root.idle;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { Playback.expanded = true; }
+        }
+    }
+
+    // Centre: transport above the seek bar.
+    VerticalLayout {
+        x: (root.width - root.centre-w) / 2;
+        y: 10px;
+        width: root.centre-w;
+        height: 68px;
+        spacing: 6px;
+        HorizontalLayout {
+            alignment: center;
+            spacing: Theme.space-sm;
+            IconButton {
+                y: (parent.height - self.height) / 2;
+                commands: Icons.shuffle;
+                active: Playback.shuffle;
+                active-color: root.accent;
+                enabled: !root.idle;
+                clicked => { Playback.toggle-shuffle(); }
+            }
+            IconButton {
+                y: (parent.height - self.height) / 2;
+                width: 40px;
+                height: 40px;
+                icon-size: 22px;
+                solid: true;
+                commands: Icons.prev;
+                enabled: !root.idle;
+                clicked => { Playback.prev(); }
+            }
+            PlayButton {
+                y: (parent.height - self.height) / 2;
+                diameter: 44px;
+                enabled: !root.idle;
+                clicked => { Playback.play-pause(); }
+            }
+            IconButton {
+                y: (parent.height - self.height) / 2;
+                width: 40px;
+                height: 40px;
+                icon-size: 22px;
+                solid: true;
+                commands: Icons.next;
+                enabled: !root.idle;
+                clicked => { Playback.next(); }
+            }
+            IconButton {
+                y: (parent.height - self.height) / 2;
+                commands: Icons.repeat;
+                active: Playback.repeat;
+                active-color: root.accent;
+                enabled: !root.idle;
+                clicked => { Playback.toggle-repeat(); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-sm;
+            Text {
+                width: 40px;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                text: root.idle ? "" : Fmt.mmss(seek.dragging ? Math.round(seek.shown * Playback.duration-ms) : Playback.position-ms);
+                color: Theme.text-tertiary;
+                font-size: Theme.size-caption;
+                letter-spacing: Theme.tracking-caption;
+            }
+            seek := Scrubber {
+                horizontal-stretch: 1;
+                value: Playback.duration-ms > 0 ? Playback.position-ms / Playback.duration-ms : 0;
+                fill-color: root.accent;
+                enabled: !root.idle && Playback.duration-ms > 0;
+                released(v) => {
+                    Playback.position-ms = Math.round(v * Playback.duration-ms);
+                    Playback.seek(Playback.position-ms);
+                }
+            }
+            Text {
+                width: 40px;
+                vertical-alignment: center;
+                text: root.idle ? "" : Fmt.mmss(Playback.duration-ms);
+                color: Theme.text-tertiary;
+                font-size: Theme.size-caption;
+                letter-spacing: Theme.tracking-caption;
+            }
+        }
+    }
+
+    // Right: volume (click the speaker to mute) and expand.
+    HorizontalLayout {
+        x: root.width - Theme.space-xl - root.side-w;
+        y: (root.height - self.height) / 2;
+        width: root.side-w;
+        height: 36px;
+        alignment: end;
+        spacing: Theme.space-xs;
+        IconButton {
+            commands: Icons.lyrics;
+            active: Playback.show-lyrics;
+            active-color: root.accent;
+            enabled: !root.idle;
+            clicked => {
+                if (Playback.show-lyrics && !Playback.expanded) {
+                    Playback.expanded = true;
+                } else {
+                    Playback.show-lyrics = !Playback.show-lyrics;
+                    if (Playback.show-lyrics) {
+                        Playback.expanded = true;
+                    }
+                }
+            }
+        }
+        IconButton {
+            commands: Playback.volume <= 0.001 ? Icons.volume-mute : Playback.volume < 0.5 ? Icons.volume-low : Icons.volume-high;
+            clicked => {
+                if (Playback.volume > 0.001) {
+                    root.saved-volume = Playback.volume;
+                    Playback.volume = 0;
+                } else {
+                    Playback.volume = root.saved-volume;
+                }
+                Playback.set-volume(Playback.volume);
+            }
+        }
+        Scrubber {
+            width: Math.max(72px, Math.min(120px, root.side-w - 4 * 36px - 4 * Theme.space-xs));
+            y: 8px;
+            value: Playback.volume;
+            fill-color: root.accent;
+            live(v) => {
+                Playback.volume = v;
+                if (Math.round(v * 100) != root.last-sent) {
+                    root.last-sent = Math.round(v * 100);
+                    Playback.set-volume(v);
+                }
+            }
+            released(v) => {
+                Playback.volume = v;
+                Playback.set-volume(v);
+            }
+        }
+        IconButton {
+            commands: Playback.expanded ? Icons.chevron-down : Icons.chevron-up;
+            icon-size: 22px;
+            enabled: !root.idle || Playback.expanded;
+            clicked => { Playback.expanded = !Playback.expanded; }
+        }
+    }
+}
+
+// One lyric line. `state`: -1 sung, 0 current, 1 coming up, 2 plain (unsynced). Every line is heading
+// size and may wrap to two lines inside the fixed row height that ListView needs.
+component LyricRow inherits Rectangle {
+    in property <LyricLine> line;
+    in property <int> state;
+    in property <bool> clickable;
+    callback clicked;
+    height: root.line.text == "" ? 24px : 64px;
+    border-radius: Theme.radius-control;
+    background: (root.clickable && touch.has-hover) ? Theme.hover : transparent;
+    animate background { duration: Theme.duration-fast; easing: Theme.ease; }
+
+    Text {
+        x: Theme.space-md;
+        y: 0px;
+        width: parent.width - 2 * Theme.space-md;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.line.text;
+        wrap: word-wrap;
+        overflow: elide;
+        font-size: root.state == 0 ? 28px : 22px;
+        letter-spacing: root.state == 0 ? Theme.tracking-title : Theme.tracking-heading;
+        font-weight: root.state == 0 ? Theme.weight-bold : Theme.weight-semibold;
+        color: root.state == 0 ? #ffffff : root.state < 0 ? #ffffff.mix(transparent, 55%) : root.state == 1 ? #ffffff.mix(transparent, 68%) : #ffffff;
+        animate font-size, color { duration: Theme.duration-fast; easing: Theme.ease; }
+    }
+    touch := TouchArea {
+        enabled: root.clickable && root.line.text != "";
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Compact title line, then the lyrics. Synced lyrics follow `position-ms`: the current line is the
+// last one that has started, and the list scrolls it to about a third from the top. A manual scroll
+// pauses that for 3 s. With no lines, the note is shown instead.
+component LyricsPanel inherits Rectangle {
+    property <int> n: Playback.lyrics.length;
+    property <int> pos: Playback.position-ms;
+    property <bool> synced: Playback.lyrics-synced;
+    property <string> track: Playback.title;
+    property <length> vh: list.visible-height;
+    property <length> row-h: 64px;
+    property <int> active: -1;
+    property <int> probe: -1;
+    property <bool> paused;
+    property <duration> resume-at;
+
+    // Index of the last line whose start is <= position (-1 before the first): a binary descent,
+    // since Slint expressions have no loops. Handles up to 2047 lines.
+    function locate() {
+        if (!Playback.lyrics-synced || Playback.lyrics.length == 0) {
+            root.active = -1;
+            return;
+        }
+        root.probe = -1;
+        if (root.probe + 1024 < Playback.lyrics.length && Playback.lyrics[root.probe + 1024].start-ms <= Playback.position-ms) { root.probe += 1024; }
+        if (root.probe + 512 < Playback.lyrics.length && Playback.lyrics[root.probe + 512].start-ms <= Playback.position-ms) { root.probe += 512; }
+        if (root.probe + 256 < Playback.lyrics.length && Playback.lyrics[root.probe + 256].start-ms <= Playback.position-ms) { root.probe += 256; }
+        if (root.probe + 128 < Playback.lyrics.length && Playback.lyrics[root.probe + 128].start-ms <= Playback.position-ms) { root.probe += 128; }
+        if (root.probe + 64 < Playback.lyrics.length && Playback.lyrics[root.probe + 64].start-ms <= Playback.position-ms) { root.probe += 64; }
+        if (root.probe + 32 < Playback.lyrics.length && Playback.lyrics[root.probe + 32].start-ms <= Playback.position-ms) { root.probe += 32; }
+        if (root.probe + 16 < Playback.lyrics.length && Playback.lyrics[root.probe + 16].start-ms <= Playback.position-ms) { root.probe += 16; }
+        if (root.probe + 8 < Playback.lyrics.length && Playback.lyrics[root.probe + 8].start-ms <= Playback.position-ms) { root.probe += 8; }
+        if (root.probe + 4 < Playback.lyrics.length && Playback.lyrics[root.probe + 4].start-ms <= Playback.position-ms) { root.probe += 4; }
+        if (root.probe + 2 < Playback.lyrics.length && Playback.lyrics[root.probe + 2].start-ms <= Playback.position-ms) { root.probe += 2; }
+        if (root.probe + 1 < Playback.lyrics.length && Playback.lyrics[root.probe + 1].start-ms <= Playback.position-ms) { root.probe += 1; }
+        root.active = root.probe;
+    }
+
+    // Put the current row's centre about a third of the way down the list.
+    function follow() {
+        if (root.paused || !Playback.lyrics-synced) {
+            return;
+        }
+        list.content-y = Math.clamp(root.vh * 0.4 - root.row-h / 2 - Math.max(root.active, 0) * root.row-h, Math.min(0px, root.vh - list.content-height), 0px);
+    }
+
+    changed pos => { root.locate(); }
+    changed synced => {
+        root.locate();
+        root.follow();
+    }
+    changed active => { root.follow(); }
+    changed vh => { root.follow(); }
+    // New track or new lyrics: start from the top again.
+    changed track => { root.restart(); }
+    changed n => { root.restart(); }
+    function restart() {
+        root.paused = false;
+        root.locate();
+        list.content-y = 0px;
+        root.follow();
+    }
+
+    Timer {
+        interval: 500ms;
+        running: root.paused;
+        triggered => {
+            if (animation-tick() >= root.resume-at) {
+                root.paused = false;
+                root.follow();
+            }
+        }
+    }
+
+    VerticalLayout {
+        x: Theme.space-md;
+        y: 0px;
+        width: parent.width - 2 * Theme.space-md;
+        height: 38px;
+        alignment: center;
+        spacing: 2px;
+        Text {
+            text: Playback.title;
+            color: Theme.text;
+            font-size: Theme.size-body;
+            font-weight: Theme.weight-semibold;
+            overflow: elide;
+        }
+        Text {
+            text: Playback.artist;
+            color: Theme.text-secondary;
+            font-size: Theme.size-caption;
+            letter-spacing: Theme.tracking-caption;
+            overflow: elide;
+        }
+    }
+
+    list := ListView {
+        x: 0px;
+        y: 46px;
+        width: parent.width;
+        height: parent.height - 46px;
+        visible: root.n > 0;
+        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+        animate content-y { duration: Theme.duration-normal; easing: Theme.ease; }
+        scrolled => {
+            root.paused = true;
+            root.resume-at = animation-tick() + 3s;
+        }
+        for line[i] in Playback.lyrics : LyricRow {
+            line: line;
+            state: !root.synced ? 2 : i < root.active ? -1 : i == root.active ? 0 : 1;
+            clickable: root.synced;
+            clicked => {
+                Playback.position-ms = line.start-ms;
+                Playback.seek(line.start-ms);
+            }
+        }
+    }
+    Text {
+        visible: root.n == 0;
+        x: Theme.space-md;
+        y: 50px + Theme.space-sm;
+        width: parent.width - 2 * Theme.space-md;
+        text: Playback.lyrics-note;
+        color: Theme.text-secondary;
+        font-size: Theme.size-body;
+        wrap: word-wrap;
+    }
+}
+
+// Fills its parent. To show/hide it, animate its `opacity` (0 to 1, it hides itself below 1%) and
+// optionally `y` (e.g. 24px to 0) from the host. It swallows clicks so pages below stay inert.
+export component NowPlayingView inherits Rectangle {
+    property <bool> idle: Playback.title == "";
+    property <color> accent: Playback.accent;
+    property <color> top-tint: root.accent.mix(Theme.bg, 0.24);
+    property <length> margin: Theme.space-3xl;
+    property <length> gap: 48px;
+    property <length> art-size: Math.max(200px, Math.min(540px, Math.min(root.height - 100px, (root.width - 2 * root.margin - root.gap) * 0.42)));
+    property <length> col-w: Math.max(340px, Math.min(1000px, root.width - 2 * root.margin - root.gap - root.art-size));
+    property <length> group-x: (root.width - root.art-size - root.gap - root.col-w) / 2;
+    property <length> group-y: (root.height - root.art-size) / 2;
+    // Background colour at a given y, for the art's corner masks (the gradient is vertical).
+    property <color> bg-at-art-top: root.top-tint.mix(Theme.bg, 1 - Math.min(root.group-y / Math.max(root.height * 0.7, 1px), 1));
+    property <color> bg-at-art-bottom: root.top-tint.mix(Theme.bg, 1 - Math.min((root.group-y + root.art-size) / Math.max(root.height * 0.7, 1px), 1));
+    animate accent { duration: Theme.duration-normal; easing: Theme.ease; }
+    visible: root.opacity > 0.01;
+    background: @linear-gradient(180deg, root.top-tint 0%, Theme.bg 70%);
+
+    TouchArea { }
+
+    IconButton {
+        x: Theme.space-xl;
+        y: Theme.space-xl;
+        width: 40px;
+        height: 40px;
+        icon-size: 26px;
+        commands: Icons.chevron-down;
+        clicked => { Playback.expanded = false; }
+    }
+
+    Cover {
+        x: root.group-x;
+        y: root.group-y;
+        width: root.art-size;
+        height: root.art-size;
+        source: Playback.art;
+        radius: Theme.radius-art;
+        backdrop: root.bg-at-art-top;
+        backdrop-bottom: root.bg-at-art-bottom;
+    }
+
+    // Right column, as tall as the art: the title block or the lyrics hang from its top edge (they
+    // cross-fade on `Playback.show-lyrics`). Controls live on the bottom bar only.
+    Rectangle {
+        x: root.group-x + root.art-size + root.gap;
+        y: root.group-y;
+        width: root.col-w;
+        height: root.art-size;
+
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            opacity: Playback.show-lyrics ? 0 : 1;
+            visible: self.opacity > 0.01;
+            animate opacity { duration: Theme.duration-fast; easing: Theme.ease; }
+            VerticalLayout {
+                alignment: center;
+                spacing: Theme.space-lg;
+                Text {
+                    text: Playback.album;
+                    color: Theme.text-secondary;
+                    font-size: Theme.size-heading;
+                    font-weight: Theme.weight-medium;
+                    overflow: elide;
+                }
+                Text {
+                    text: Playback.title;
+                    color: Theme.text;
+                    font-size: Playback.title.character-count > 18 ? Theme.size-title : Theme.size-display;
+                    font-weight: Theme.weight-bold;
+                    letter-spacing: Playback.title.character-count > 18 ? Theme.tracking-title : Theme.tracking-display;
+                    wrap: word-wrap;
+                    overflow: elide;
+                    height: Math.min(self.preferred-height, (Playback.title.character-count > 18 ? 3.1 : 2.1) * 1.3 * self.font-size);
+                }
+                Text {
+                    text: Playback.artist;
+                    color: Theme.text-secondary;
+                    font-size: Theme.size-title;
+                    font-weight: Theme.weight-medium;
+                    letter-spacing: Theme.tracking-title;
+                    overflow: elide;
+                }
+            }
+        }
+
+        LyricsPanel {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            opacity: Playback.show-lyrics ? 1 : 0;
+            visible: self.opacity > 0.01;
+            animate opacity { duration: Theme.duration-fast; easing: Theme.ease; }
+        }
+    }
+}
