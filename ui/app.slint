@@ -1,8 +1,15 @@
 import { Theme } from "theme.slint";
 import { Browse, Sidebar, BrowseArea } from "browse.slint";
-import { Playback, NowPlayingBar, NowPlayingView, LyricLine } from "now_playing.slint";
+import { Playback, NowPlayingBar, LyrLine, LyrRow, LyrWord, LyrLetter, KWord } from "now_playing.slint";
+import { LyricsOverlay } from "lyrics.slint";
+// The lyrics page type (yoshik.xyz uses Bricolage Grotesque; these are static instances of it).
+import "../assets/fonts/Bricolage-500.ttf";
+import "../assets/fonts/Bricolage-600.ttf";
+import "../assets/fonts/Bricolage-SemiCondensed-700.ttf";
+import "../assets/fonts/Bricolage-SemiCondensed-800.ttf";
+import "../assets/fonts/JetBrainsMono-500.ttf";
 
-export { Browse, Playback, LyricLine }
+export { Browse, Playback, LyrLine, LyrRow, LyrWord, LyrLetter, KWord }
 
 export component MainWindow inherits Window {
     title: "Cadence";
@@ -16,14 +23,15 @@ export component MainWindow inherits Window {
     background: Theme.bg;
 
     callback play-pause-key();
-    // Window resize / fullscreen toggle: the lyrics word-rows are split for the real
-    // window width, so Rust re-splits them whenever the width changes.
+    callback lyrics-key(string);
+    // Window resize / fullscreen toggle: Rust re-wraps the lyric lines for the new size.
     callback relayout-lyrics();
     changed width => { root.relayout-lyrics(); }
+    changed height => { root.relayout-lyrics(); }
 
     // Space and Escape are handled here, so this FocusScope must hold the focus whenever the search
     // field is not in use. A click anywhere else already gives it back; the search field is
-    // destroyed when the page changes and is hidden behind the full player, so reclaim it then.
+    // destroyed when the page changes and is hidden behind the lyrics page, so reclaim it then.
     property <string> page: Browse.page;
     property <bool> expanded: Playback.expanded;
     changed page => {
@@ -31,7 +39,10 @@ export component MainWindow inherits Window {
             keys.focus();
         }
     }
-    changed expanded => { keys.focus(); }
+    changed expanded => {
+        keys.focus();
+        root.relayout-lyrics();
+    }
 
     // Outermost container so keys typed into the search field bubble up to it (Space is typed, not handled).
     keys := FocusScope {
@@ -46,12 +57,17 @@ export component MainWindow inherits Window {
                 return accept;
             }
             if (event.text == Key.Escape) {
-                // Collapse the full player; otherwise leave the search field.
+                // Close the lyrics page; otherwise leave the search field.
                 if (Playback.expanded) {
                     Playback.expanded = false;
                 } else {
                     keys.focus();
                 }
+                return accept;
+            }
+            // Lyrics page shortcuts (as on yoshik.xyz): H headphones, K karaoke, S resync.
+            if (Playback.expanded && !event.repeat && (event.text == "h" || event.text == "k" || event.text == "s")) {
+                root.lyrics-key(event.text);
                 return accept;
             }
             return reject;
@@ -71,19 +87,17 @@ export component MainWindow inherits Window {
             height: root.height - 88px;
         }
 
-        NowPlayingView {
-            x: 0px;
-            y: Playback.expanded ? 0px : 24px;
-            width: root.width;
-            height: root.height - 88px;
-            opacity: Playback.expanded ? 1 : 0;
-            animate opacity, y { duration: Theme.duration-normal; easing: Theme.ease; }
-        }
-
         NowPlayingBar {
             x: 0px;
             y: root.height - 88px;
             width: root.width;
+        }
+
+        LyricsOverlay {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
         }
     }
 

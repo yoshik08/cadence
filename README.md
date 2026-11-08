@@ -30,9 +30,11 @@ Grab `cadence.exe` from the [latest release](https://github.com/yoshik08/cadence
 - Spotify Connect device named "Cadence": pick it from any Spotify app, or play from Cadence itself
 - Gapless playback and loudness normalisation
 - Media keys and the Windows media overlay (System Media Transport Controls)
-- Space plays and pauses, Esc closes the full player
-- Home (recently played, your playlists), search, playlist, album and artist pages, Liked Songs
-- Synced lyrics view with the accent colour pulled from the current album art
+- Space plays and pauses, Esc closes the lyrics page (H toggles the headphones delay, S resets the lyric offset)
+- Home (recently played, your playlists), search, playlist, album and artist pages, Liked Songs, and a sidebar with all your playlists
+- Lyrics page in the yoshik.xyz design: blurred album art, the active line centred with smooth scrolling, word-synced letters lighting up as they are sung, long lines wrapping instead of being cut, and type that scales with the window
+- Lyric offset nudges (−/+ 50 ms) and a Headphones toggle that delays lyrics 225 ms for Bluetooth audio
+- Everything is cached on disk once: played audio (up to 1 GB), album art, lyrics and library pages, so nothing is downloaded twice
 - The accent colour follows the current album art
 
 ## Requirements
@@ -81,6 +83,11 @@ For development, `cargo build --features smoke` adds a PNG snapshot writer. Two 
 
 - `CADENCE_SMOKE=1` opens an inactive window, writes a snapshot to `CADENCE_SNAPSHOT` (default `smoke.png`) after about 1.5 s, and exits.
 - `CADENCE_OFFLINE=1` opens an inactive window and keeps running until closed, for measuring idle memory.
+- `CADENCE_DEMO=1` shows the lyrics page for one track with a simulated clock and no Spotify session; `scripts/demo.sh` drives it and writes snapshots.
+
+Karaoke mode (Apple Music syllable timings) is a personal-build feature: `cargo build --release --features karaoke` with an Apple Music media-user-token in `APPLE_MEDIA_USER_TOKEN` or `%APPDATA%\cadence\apple_media_token.txt`. Release builds leave it out.
+
+Caches live in `%LOCALAPPDATA%\cadence\cache` (`audio`, `art`, `lyrics`, `api`), each size-capped and pruned oldest-first at startup.
 
 ## Memory
 

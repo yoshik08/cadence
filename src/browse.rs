@@ -6,7 +6,7 @@
 //! missing, which aborts a release build. Requests still go through rspotify (`api_get`), so token
 //! refresh stays its job.
 
-use crate::{art, Browse, Card, MainWindow, TrackRow};
+use crate::{art, cache, Browse, Card, MainWindow, Playback, TrackRow};
 use rspotify::model::Image as SpImage;
 use rspotify::{http::HttpError, prelude::*, AuthCodePkceSpotify, ClientError};
 use serde_json::Value;
@@ -112,9 +112,42 @@ fn arr(v: &Value) -> &[Value] {
     v.as_array().map_or(&[][..], |a| a.as_slice())
 }
 
+/// How long a cached response is reused: albums never change, libraries rarely.
+fn max_age(path: &str) -> Duration {
+    const H: u64 = 3600;
+    Duration::from_secs(if path.starts_with("albums/") || path.starts_with("artists/") || path == "me" {
+        30 * 24 * H
+    } else if path.starts_with("me/player/recently-played") {
+        600
+    } else if path == "search" {
+        24 * H
+    } else {
+        12 * H
+    })
+}
+
+/// One GET through the disk cache: a response is fetched once and reused (across launches) until
+/// it is older than `max_age`, so browsing never re-downloads what it already has.
+async fn get(sp: &AuthCodePkceSpotify, path: &str, query: &[(&str, &str)]) -> Result<Value, String> {
+    let mut parts: Vec<String> = query.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    parts.sort();
+    let name = format!("{}.json", cache::key(&format!("{path}?{}", parts.join("&"))));
+    let age = max_age(path);
+    let n = name.clone();
+    if let Some(b) = tokio::task::spawn_blocking(move || cache::read("api", &n, Some(age))).await.ok().flatten() {
+        if let Ok(v) = serde_json::from_slice(&b) {
+            return Ok(v);
+        }
+    }
+    let v = get_live(sp, path, query).await?;
+    let data = v.to_string();
+    tokio::task::spawn_blocking(move || cache::write("api", &name, data.as_bytes()));
+    Ok(v)
+}
+
 /// One GET. A 429 is retried up to 3 times after the `Retry-After` seconds Spotify sends (2 s if
 /// the header is missing); a wait over 30 s is not worth blocking a page for, so it fails at once.
-async fn get(sp: &AuthCodePkceSpotify, path: &str, query: &[(&str, &str)]) -> Result<Value, String> {
+async fn get_live(sp: &AuthCodePkceSpotify, path: &str, query: &[(&str, &str)]) -> Result<Value, String> {
     let q: HashMap<&str, &str> = query.iter().copied().collect();
     let mut retries = 0;
     loop {
@@ -860,9 +893,14 @@ pub fn init(
             search(&e, &ui, &text);
         }
     });
-    let e = env.clone();
+    let (e, w) = (env.clone(), ui.as_weak());
     b.on_play(move |uri, index| {
         if !uri.is_empty() {
+            // Remember the playlist / album being played for the bar's playlist button.
+            if let Some(ui) = w.upgrade() {
+                let ctx = if uri.starts_with("spotify:track:") { "" } else { uri.as_str() };
+                ui.global::<Playback>().set_context_uri(ctx.into());
+            }
             (e.play)(uri.to_string(), index.max(0) as usize);
         }
     });
@@ -879,5 +917,32 @@ pub fn init(
         }
     });
 
+    fill_sidebar(&env);
     go_home(&env, ui);
+}
+
+/// The sidebar's playlist list: every page of my playlists, titles and uris only (no art).
+fn fill_sidebar(env: &Env) {
+    let (e, weak) = (env.clone(), env.ui.clone());
+    env.rt.spawn(async move {
+        let mut cards = Vec::new();
+        let mut offset = 0;
+        loop {
+            let Ok(c) = fetch_page(&e.sp, Kind::Playlists, "", offset).await else { break };
+            offset += c.count;
+            if let Items::Cards(list) = c.items {
+                cards.extend(list.into_iter().map(|c| (c.title, c.uri)));
+            }
+            if !c.more || c.count == 0 {
+                break;
+            }
+        }
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let rows: Vec<Card> = cards
+                .into_iter()
+                .map(|(title, uri)| Card { title: title.into(), uri: uri.into(), ..Default::default() })
+                .collect();
+            ui.global::<Browse>().set_side_playlists(Rc::new(VecModel::from(rows)).into());
+        });
+    });
 }

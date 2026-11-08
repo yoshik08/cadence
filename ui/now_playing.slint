@@ -3,30 +3,57 @@
 // between events. Nothing here takes keyboard focus.
 import { Theme } from "theme.slint";
 import { Cover } from "cover.slint";
-import { ListView } from "std-widgets.slint";
 
-export struct LyricLetter {
-    // One letter of a word, with the position (ms) at which it lights.
-    // Thresholds are precomputed in Rust: letters light progressively through the word window.
+
+// Lyrics, pre-laid-out by Rust (src/lyrics_view.rs) for the current window width.
+export struct LyrLetter {
     ch: string,
+    // lyric-ms at which the letter lights (the word's window split evenly across its letters).
+    at: int,
+}
+
+export struct LyrWord {
+    letters: [LyrLetter],
+    // A space follows this word on its row.
+    space: bool,
+}
+
+export struct LyrRow {
+    words: [LyrWord],
+}
+
+export struct LyrLine {
     start-ms: int,
+    // The line wrapped at the normal size, and at the active size.
+    rows: [string],
+    arows: [string],
+    // Per-letter rows at the active size; empty without word timings.
+    wrows: [LyrRow],
+    // Offset of the line's top from the first line's top (all earlier lines inactive), its height
+    // inactive and active. Includes the 16px top and bottom padding.
+    top: length,
+    h: length,
+    ah: length,
 }
 
-export struct LyricWord {
-    letters: [LyricLetter],
-    // Visual row (0 or 1) the word sits on; assigned in Rust from the real window width
-    // so the karaoke line wraps instead of truncating or clipping.
-    row: int,
-}
-
-export struct LyricLine {
+// One karaoke word slot. Positions are the centre of the word, in window px.
+export struct KWord {
     text: string,
-    start-ms: int,
-    end-ms: int,
-    // Per-word letter timings (yoshik.xyz word mode); empty for line-synced or plain lines.
-    words: [LyricWord],
-    // How many visual rows the word-mode rendering uses (1 or 2).
-    word-rows: int,
+    x: length,
+    y: length,
+    size: length,
+    opacity: float,
+    // 0 upcoming, 1 being sung, 2 sung; the text colour for that state (fades computed in Rust).
+    state: int,
+    color: color,
+    // Highlight box opacity, scale and slide (em).
+    hl: float,
+    hl-sx: float,
+    hl-sy: float,
+    hl-dx: float,
+    icon: string,
+    icon-left: bool,
+    icon-scale: float,
 }
 
 export global Playback {
@@ -36,7 +63,12 @@ export global Playback {
     in-out property <image> art;
     // Optional extra: a 56px-sized copy for the bar (crisper than scaling `art` down). Unset, the bar uses `art`.
     in-out property <image> bar-art;
+    // Lyrics page: the art with its corners rounded in alpha, a 44px copy, and a tiny blurred copy.
+    in property <image> side-art;
+    in property <image> thumb-art;
+    in property <image> bg-art;
     in-out property <color> accent: Theme.accent;
+    // Rust owns the clock: it writes position-ms from a monotonic anchor, never from a UI timer.
     in-out property <int> position-ms;
     in-out property <int> duration-ms;
     in-out property <bool> playing;
@@ -44,12 +76,31 @@ export global Playback {
     in-out property <bool> repeat;
     in-out property <float> volume: 0.6;
     in-out property <bool> expanded;
-    // Lyrics (Rust fills `lyrics`; `end-ms` is the next line's start, the last line's the duration).
-    // `lyrics-note` is "" while lines exist, otherwise a one-line status. `show-lyrics` is the toggle.
-    in property <[LyricLine]> lyrics;
-    in property <bool> lyrics-synced;
-    in property <string> lyrics-note;
-    in-out property <bool> show-lyrics: true;
+    // The context (playlist / album / liked) the current track was started from.
+    in property <string> context-uri;
+
+    // Lyrics page.
+    in property <[LyrLine]> lyr-lines;
+    in property <bool> lyr-synced;
+    in property <length> lyr-total-h;
+    in property <int> lyr-active: -1;
+    in property <string> lyr-hint;
+    // position-ms plus the nudge and headphones offsets.
+    in property <int> lyric-ms;
+    in property <int> nudge-ms;
+    in property <bool> sync-flash;
+    in property <bool> headphones;
+    // Karaoke exists only in builds with the `karaoke` feature (`karaoke-allowed`).
+    in property <bool> karaoke-allowed;
+    in property <bool> karaoke-available;
+    in property <bool> karaoke;
+    in property <string> k-style: "visual";
+    in property <color> k-lyric: #ffffff;
+    in property <color> k-highlight: #ff3d8b;
+    in property <color> k-secondary: #d6906c;
+    in property <[KWord]> k-words;
+    in property <image> k-bg;
+
     callback play-pause();
     callback next();
     callback prev();
@@ -57,24 +108,38 @@ export global Playback {
     callback set-volume(float);
     callback toggle-shuffle();
     callback toggle-repeat();
+    callback open-context();
+    callback nudge(int);
+    callback sync-reset();
+    callback toggle-headphones();
+    callback set-karaoke(bool);
+    callback set-k-style(string);
+    callback cycle-color(string, int);
+    callback reset-k-colors();
 }
 
-// Icons on a 24 grid. Transport glyphs are solid with a 2px round-joined outline (so the corners
-// are soft); everything else is a 1.75px round-capped stroke.
-global Icons {
-    out property <string> play: "M8 5.5 L8 18.5 L19 12 Z";
-    out property <string> pause: "M7.5 6 H10.5 V18 H7.5 Z M13.5 6 H16.5 V18 H13.5 Z";
-    out property <string> prev: "M5 6.5 H6.5 V17.5 H5 Z M19 6.5 L11 12 L19 17.5 Z";
-    out property <string> next: "M19 6.5 H17.5 V17.5 H19 Z M5 6.5 L13 12 L5 17.5 Z";
-    out property <string> shuffle: "M3 7 H6 C11 7 13 17 18 17 H20.5 M18.5 14.5 L21 17 L18.5 19.5 M3 17 H6 C7.6 17 8.8 16.4 9.7 15.3 M14.3 8.7 C15.2 7.6 16.4 7 18 7 H20.5 M18.5 4.5 L21 7 L18.5 9.5";
-    out property <string> repeat: "M4 12 V10 C4 7.8 5.8 6 8 6 H20 M17 3 L20 6 L17 9 M20 12 V14 C20 16.2 18.2 18 16 18 H4 M7 15 L4 18 L7 21";
-    // A speech bubble with two text lines.
-    out property <string> lyrics: "M6 4.5 H18 C19.4 4.5 20.5 5.6 20.5 7 V14 C20.5 15.4 19.4 16.5 18 16.5 H11 L7 20 V16.5 H6 C4.6 16.5 3.5 15.4 3.5 14 V7 C3.5 5.6 4.6 4.5 6 4.5 Z M8 9 H16 M8 12 H13";
+// Icons on a 24 grid. Transport glyphs are solid shapes with rounded corners; everything else is
+// a round-capped stroke.
+export global Icons {
+    out property <string> play: "M8 5.14v13.72a1 1 0 0 0 1.52.85l10.6-6.86a1 1 0 0 0 0-1.7L9.52 4.29A1 1 0 0 0 8 5.14z";
+    out property <string> pause: "M7 5h2.5a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z M14.5 5H17a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-2.5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z";
+    out property <string> prev: "M6 5a1 1 0 0 1 1 1v12a1 1 0 0 1-2 0V6a1 1 0 0 1 1-1z M19 6.2v11.6a1 1 0 0 1-1.55.83l-8.7-5.8a1 1 0 0 1 0-1.66l8.7-5.8A1 1 0 0 1 19 6.2z";
+    out property <string> next: "M18 5a1 1 0 0 1 1 1v12a1 1 0 0 1-2 0V6a1 1 0 0 1 1-1z M5 6.2v11.6a1 1 0 0 0 1.55.83l8.7-5.8a1 1 0 0 0 0-1.66l-8.7-5.8A1 1 0 0 0 5 6.2z";
+    out property <string> shuffle: "M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22 M18 2l4 4-4 4 M2 6h1.9c1.5 0 2.9.9 3.6 2.2 M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8 M18 14l4 4-4 4";
+    out property <string> repeat: "M17 2l4 4-4 4 M3 11v-1a4 4 0 0 1 4-4h14 M7 22l-4-4 4-4 M21 13v1a4 4 0 0 1-4 4H3";
+    out property <string> lyrics: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z M13 8H7 M17 12H7";
+    out property <string> playlist: "M21 15V6 M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z M12 12H3 M16 6H3 M12 18H3";
+    out property <string> home: "M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8 M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z";
+    out property <string> search: "M4 11a7 7 0 1 0 14 0a7 7 0 1 0-14 0 M21 21l-4.3-4.3";
+    out property <string> heart: "M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7z";
     out property <string> chevron-up: "M6 15 L12 9 L18 15";
     out property <string> chevron-down: "M6 9 L12 15 L18 9";
-    out property <string> volume-mute: "M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z M16 9.5 L21 14.5 M21 9.5 L16 14.5";
-    out property <string> volume-low: "M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z M15.5 9.2 A4 4 0 0 1 15.5 14.8";
-    out property <string> volume-high: "M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z M15.5 9.2 A4 4 0 0 1 15.5 14.8 M18.2 6.8 A8 8 0 0 1 18.2 17.2";
+    out property <string> volume-mute: "M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z M22 9l-6 6 M16 9l6 6";
+    out property <string> volume-low: "M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z M16 9a5 5 0 0 1 0 6";
+    out property <string> volume-high: "M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z M16 9a5 5 0 0 1 0 6 M19.4 18.4a9 9 0 0 0 0-12.8";
+    out property <string> headphones: "M3 18v-6a9 9 0 0 1 18 0v6 M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z";
+    out property <string> mic: "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z M19 10v2a7 7 0 0 1-14 0v-2 M12 19L12 22";
+    out property <string> sync: "M21 12a9 9 0 1 1-2.64-6.36 M21 3L21 9L15 9";
 }
 
 global Fmt {
@@ -97,7 +162,7 @@ component Icon inherits Path {
     viewbox-height: 24;
     fill: root.solid ? root.tint : transparent;
     stroke: root.tint;
-    stroke-width: (root.solid ? 2px : 1.75px) * (root.size / 24px);
+    stroke-width: (root.solid ? 0.6px : 1.75px) * (root.size / 24px);
     stroke-line-cap: round;
     stroke-line-join: round;
     animate fill, stroke { duration: Theme.duration-fast; easing: Theme.ease; }
@@ -232,7 +297,7 @@ component Scrubber inherits Rectangle {
     }
 }
 
-// 88px tall, any width. Keep exactly one instance alive: it owns the position Timer.
+// 88px tall, any width.
 export component NowPlayingBar inherits Rectangle {
     property <bool> idle: Playback.title == "";
     property <color> accent: Playback.accent;
@@ -243,14 +308,6 @@ export component NowPlayingBar inherits Rectangle {
     animate accent { duration: Theme.duration-normal; easing: Theme.ease; }
     height: 88px;
     background: Theme.bg;
-
-    Timer {
-        interval: 100ms;
-        running: Playback.playing && Playback.duration-ms > 0;
-        triggered => {
-            Playback.position-ms = Math.min(Playback.position-ms + 100, Playback.duration-ms);
-        }
-    }
 
     Rectangle {
         y: 0;
@@ -393,6 +450,12 @@ export component NowPlayingBar inherits Rectangle {
         height: 36px;
         alignment: end;
         spacing: Theme.space-xs;
+        // Opens the playlist / album the current track was started from.
+        IconButton {
+            commands: Icons.playlist;
+            enabled: Playback.context-uri != "";
+            clicked => { Playback.open-context(); }
+        }
         IconButton {
             commands: Icons.lyrics;
             active: Playback.expanded;
@@ -430,345 +493,6 @@ export component NowPlayingBar inherits Rectangle {
                 Playback.volume = v;
                 Playback.set-volume(v);
             }
-        }
-        IconButton {
-            commands: Playback.expanded ? Icons.chevron-down : Icons.chevron-up;
-            icon-size: 22px;
-            enabled: !root.idle || Playback.expanded;
-            clicked => { Playback.expanded = !Playback.expanded; }
-        }
-    }
-}
-
-// One visual row of the karaoke line: the words assigned to `row`, letters lighting in turn.
-component LyricWordRow inherits HorizontalLayout {
-    in property <[LyricWord]> words;
-    in property <int> row-index;
-    in property <length> font-size;
-    spacing: 0px;
-    for word in root.words : HorizontalLayout {
-        visible: word.row == root.row-index;
-        spacing: 0px;
-        for letter in word.letters : Text {
-            text: letter.ch;
-            color: Playback.position-ms >= letter.start-ms ? #ffffff : #ffffff.mix(transparent, 68%);
-            font-size: root.font-size;
-            letter-spacing: -0.6px;
-            font-weight: Theme.weight-bold;
-        }
-        Text {
-            text: " ";
-            font-size: root.font-size;
-            font-weight: Theme.weight-bold;
-        }
-    }
-}
-
-// One lyric line. `state`: -1 sung, 0 current, 1 coming up, 2 plain (unsynced).
-// Sizing is handed in by LyricsPanel and scales with the window: rows are tall enough
-// for a wrapped two-line lyric, and lines wrap instead of truncating with "...".
-component LyricRow inherits Rectangle {
-    in property <LyricLine> line;
-    in property <int> state;
-    in property <bool> clickable;
-    in property <length> active-size: 42px;
-    in property <length> other-size: 26px;
-    in property <length> row-height: 105px;
-    callback clicked;
-    height: root.row-height;
-    border-radius: Theme.radius-control;
-    background: (root.clickable && touch.has-hover) ? Theme.hover : transparent;
-    animate background { duration: Theme.duration-fast; easing: Theme.ease; }
-
-    // Word-by-word karaoke (yoshik.xyz): the active line renders per-letter; letters light
-    // as position-ms passes each letter's threshold (precomputed in Rust).
-    property <bool> word-mode: root.state == 0 && root.line.words.length > 0;
-
-    Text {
-        visible: !root.word-mode;
-        x: Theme.space-sm;
-        y: 0px;
-        width: parent.width - 2 * Theme.space-sm;
-        height: parent.height;
-        vertical-alignment: center;
-        text: root.line.text;
-        wrap: word-wrap;
-        // Never truncate a lyric line with "...": long lines wrap onto a second line
-        // and the row is sized for two lines, so nothing is clipped.
-        font-size: root.state == 0 ? root.active-size : root.other-size;
-        letter-spacing: root.state == 0 ? -0.6px : -0.3px;
-        font-weight: Theme.weight-bold;
-        color: root.state == 0 ? #ffffff : root.state < 0 ? #ffffff.mix(transparent, 55%) : root.state == 1 ? #ffffff.mix(transparent, 68%) : #ffffff;
-        animate font-size, color { duration: Theme.duration-fast; easing: Theme.ease; }
-    }
-
-    // Word flow for the active line: letters light one by one, words wrap like the plain text.
-    // Words are pre-split into at most two visual rows in Rust (build_lyric_words) from the
-    // real window width, so a long line wraps instead of truncating or clipping.
-    // Two rows fill the row (2.5x the active font); a single row is vertically centered.
-    VerticalLayout {
-        visible: root.word-mode;
-        x: Theme.space-sm;
-        y: (parent.height - root.line.word-rows * root.active-size * 1.25) / 2;
-        width: parent.width - 2 * Theme.space-sm;
-        spacing: 0px;
-        LyricWordRow { words: root.line.words; row-index: 0; font-size: root.active-size; }
-        LyricWordRow { words: root.line.words; row-index: 1; font-size: root.active-size; visible: root.line.word-rows > 1; }
-    }
-    touch := TouchArea {
-        enabled: root.clickable && root.line.text != "";
-        mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
-// Synced lyrics follow `position-ms`: the current line is vertically centered at the screen midpoint.
-// A manual scroll pauses auto-follow for 4 s.
-component LyricsPanel inherits Rectangle {
-    property <int> n: Playback.lyrics.length;
-    property <int> pos: Playback.position-ms;
-    property <bool> synced: Playback.lyrics-synced;
-    property <string> track: Playback.title;
-    property <length> vh: list.visible-height;
-    // Type scales with the panel width so fullscreen and windowed both fit: full 42px
-    // at wide sizes, shrinking to 65% at narrow ones. Row height is 2.5x the active
-    // font size, so a line that wraps onto two lines still fits inside its row.
-    property <float> scale: Math.clamp(root.width / 900px, 0.65, 1.0);
-    property <length> active-size: 42px * root.scale;
-    property <length> other-size: 26px * root.scale;
-    property <length> row-h: root.active-size * 2.5;
-    property <int> active: -1;
-    property <int> probe: -1;
-    property <bool> paused;
-    property <duration> resume-at;
-
-    function locate() {
-        if (!Playback.lyrics-synced || Playback.lyrics.length == 0) {
-            root.active = -1;
-            return;
-        }
-        root.probe = -1;
-        if (root.probe + 1024 < Playback.lyrics.length && Playback.lyrics[root.probe + 1024].start-ms <= Playback.position-ms) { root.probe += 1024; }
-        if (root.probe + 512 < Playback.lyrics.length && Playback.lyrics[root.probe + 512].start-ms <= Playback.position-ms) { root.probe += 512; }
-        if (root.probe + 256 < Playback.lyrics.length && Playback.lyrics[root.probe + 256].start-ms <= Playback.position-ms) { root.probe += 256; }
-        if (root.probe + 128 < Playback.lyrics.length && Playback.lyrics[root.probe + 128].start-ms <= Playback.position-ms) { root.probe += 128; }
-        if (root.probe + 64 < Playback.lyrics.length && Playback.lyrics[root.probe + 64].start-ms <= Playback.position-ms) { root.probe += 64; }
-        if (root.probe + 32 < Playback.lyrics.length && Playback.lyrics[root.probe + 32].start-ms <= Playback.position-ms) { root.probe += 32; }
-        if (root.probe + 16 < Playback.lyrics.length && Playback.lyrics[root.probe + 16].start-ms <= Playback.position-ms) { root.probe += 16; }
-        if (root.probe + 8 < Playback.lyrics.length && Playback.lyrics[root.probe + 8].start-ms <= Playback.position-ms) { root.probe += 8; }
-        if (root.probe + 4 < Playback.lyrics.length && Playback.lyrics[root.probe + 4].start-ms <= Playback.position-ms) { root.probe += 4; }
-        if (root.probe + 2 < Playback.lyrics.length && Playback.lyrics[root.probe + 2].start-ms <= Playback.position-ms) { root.probe += 2; }
-        if (root.probe + 1 < Playback.lyrics.length && Playback.lyrics[root.probe + 1].start-ms <= Playback.position-ms) { root.probe += 1; }
-        root.active = root.probe;
-    }
-
-    // Exact vertical centering matching yoshik.xyz: scrollTarget = row.offsetTop + row.height / 2 - list.height / 2
-    function follow() {
-        if (root.paused || !Playback.lyrics-synced) {
-            return;
-        }
-        list.content-y = root.vh / 2 - root.row-h / 2 - Math.max(root.active, 0) * root.row-h;
-    }
-
-    changed pos => { root.locate(); }
-    changed synced => {
-        root.locate();
-        root.follow();
-    }
-    changed active => { root.follow(); }
-    changed vh => { root.follow(); }
-    // Resize / fullscreen toggle changes row-h (type scales with width): re-center so the
-    // active line never sits at a stale offset or clipped against the viewport edge.
-    changed row-h => { root.follow(); }
-    changed track => { root.restart(); }
-    changed n => { root.restart(); }
-    function restart() {
-        root.paused = false;
-        root.locate();
-        list.content-y = 0px;
-        root.follow();
-    }
-
-    Timer {
-        interval: 500ms;
-        running: root.paused;
-        triggered => {
-            if (animation-tick() >= root.resume-at) {
-                root.paused = false;
-                root.follow();
-            }
-        }
-    }
-
-    list := ListView {
-        x: 0px;
-        y: 0px;
-        width: parent.width;
-        height: parent.height;
-        visible: root.n > 0;
-        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
-        animate content-y { duration: Theme.duration-normal; easing: Theme.ease; }
-        scrolled => {
-            root.paused = true;
-            root.resume-at = animation-tick() + 4s;
-        }
-        for line[i] in Playback.lyrics : LyricRow {
-            line: line;
-            active-size: root.active-size;
-            other-size: root.other-size;
-            row-height: root.row-h;
-            state: !root.synced ? 2 : i < root.active ? -1 : i == root.active ? 0 : 1;
-            clickable: root.synced;
-            clicked => {
-                Playback.position-ms = line.start-ms;
-                Playback.seek(line.start-ms);
-            }
-        }
-    }
-
-    Text {
-        visible: root.n == 0;
-        x: Theme.space-md;
-        y: (parent.height - self.height) / 2;
-        width: parent.width - 2 * Theme.space-md;
-        horizontal-alignment: center;
-        text: Playback.lyrics-note;
-        color: Theme.text-secondary;
-        font-size: Theme.size-heading;
-        wrap: word-wrap;
-    }
-}
-
-// Fullscreen Now Playing overlay: exact match to yoshik.xyz / lyrics overlay
-export component NowPlayingView inherits Rectangle {
-    property <bool> idle: Playback.title == "";
-    property <color> accent: Playback.accent;
-    property <length> side-w: Math.max(260px, Math.min(520px, root.width * 0.36));
-    property <length> side-x: Math.max(36px, root.width * 0.06);
-    property <length> side-y: (root.height - (root.side-w + 80px)) / 2;
-
-    visible: root.opacity > 0.01;
-    // Ambient radial glow matching yoshik.xyz
-    background: @radial-gradient(circle, root.accent.mix(#000000, 0.40) 0%, root.accent.mix(#000000, 0.75) 50%, #08080a 100%);
-    animate accent { duration: Theme.duration-normal; easing: Theme.ease; }
-
-    TouchArea { }
-
-    IconButton {
-        x: Theme.space-xl;
-        y: Theme.space-xl;
-        width: 40px;
-        height: 40px;
-        icon-size: 26px;
-        commands: Icons.chevron-down;
-        clicked => { Playback.expanded = false; }
-    }
-
-    // Left column: Cover art, title, artist, progress bar (matches .lyrics-side)
-    Rectangle {
-        x: root.side-x;
-        y: root.side-y;
-        width: root.side-w;
-        height: root.side-w + 80px;
-
-        Cover {
-            x: 0px;
-            y: 0px;
-            width: root.side-w;
-            height: root.side-w;
-            source: Playback.art;
-            radius: 14px;
-            backdrop: root.accent.mix(#000000, 0.45);
-            backdrop-bottom: root.accent.mix(#000000, 0.65);
-        }
-
-        // Title under art
-        Text {
-            x: 0px;
-            y: root.side-w + 16px;
-            width: root.side-w;
-            height: 22px;
-            text: Playback.title;
-            color: #ffffff;
-            font-size: 17px;
-            font-weight: Theme.weight-bold;
-            overflow: elide;
-        }
-
-        // Artist under title
-        Text {
-            x: 0px;
-            y: root.side-w + 39px;
-            width: root.side-w;
-            height: 18px;
-            text: Playback.artist;
-            color: rgba(255, 255, 255, 0.55);
-            font-size: 14px;
-            font-weight: Theme.weight-medium;
-            overflow: elide;
-        }
-
-        // Progress bar under artist
-        Rectangle {
-            x: 0px;
-            y: root.side-w + 64px;
-            width: root.side-w;
-            height: 5px;
-            border-radius: 999px;
-            background: rgba(255, 255, 255, 0.14);
-            clip: true;
-
-            Rectangle {
-                x: 0px;
-                y: 0px;
-                height: 100%;
-                border-radius: 999px;
-                background: rgba(255, 255, 255, 0.85);
-                width: Playback.duration-ms > 0 ? parent.width * Math.min(1.0, Math.max(0.0, Playback.position-ms / Playback.duration-ms)) : 0px;
-            }
-
-            TouchArea {
-                mouse-cursor: MouseCursor.pointer;
-                clicked => {
-                    if (Playback.duration-ms > 0) {
-                        Playback.seek(Math.floor(Math.clamp(self.mouse-x / parent.width, 0.0, 1.0) * Playback.duration-ms));
-                    }
-                }
-            }
-        }
-    }
-
-    // Right column: Full viewport height lyrics (matches .lyrics-lines)
-    Rectangle {
-        x: root.side-x + root.side-w + Math.max(36px, root.width * 0.05);
-        y: 0px;
-        width: root.width - self.x - root.side-x;
-        height: root.height;
-        clip: true;
-
-        LyricsPanel {
-            x: 0px;
-            y: 0px;
-            width: parent.width;
-            height: parent.height;
-        }
-
-        // Soft top fade
-        Rectangle {
-            x: 0px;
-            y: 0px;
-            width: parent.width;
-            height: 80px;
-            background: @linear-gradient(180deg, #08080a 0%, transparent 100%);
-        }
-
-        // Soft bottom fade
-        Rectangle {
-            x: 0px;
-            y: parent.height - 80px;
-            width: parent.width;
-            height: 80px;
-            background: @linear-gradient(0deg, #08080a 0%, transparent 100%);
         }
     }
 }

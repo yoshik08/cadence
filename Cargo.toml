@@ -1,11 +1,14 @@
 [package]
 name = "cadence"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2024"
 
 [features]
 # Writes the CADENCE_SMOKE window snapshot to a PNG.
 smoke = ["dep:png"]
+# Karaoke mode (Apple Music syllable lyrics). Needs a personal Apple Music media-user-token in
+# local config, so it is for personal builds only: public releases are built without it.
+karaoke = []
 
 [dependencies]
 slint = { version = "1.18.1", default-features = false, features = [
@@ -29,13 +32,20 @@ reqwest = { version = "0.12.28", default-features = false, features = ["native-t
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 jpeg-decoder = { version = "0.3.2", default-features = false }
 serde_json = "1"
+# Font metrics for wrapping lyrics; already in the tree through Slint.
+ttf-parser = "0.25.1"
 windows = { version = "0.62.2", features = [
     "Foundation",
     "Media",
     "Storage_Streams",
     "Win32_Foundation",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Registry",
+    "Win32_System_Variant",
     "Win32_System_WinRT",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
 ] }
 png = { version = "0.18.1", optional = true }
 

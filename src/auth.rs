@@ -130,10 +130,13 @@ pub async fn web_api(client_id: &str) -> Result<AuthCodePkceSpotify, String> {
     Ok(spotify)
 }
 
-/// librespot cache: credentials and volume under `data_dir()/librespot`; no audio cache.
+/// librespot cache: credentials and volume under `data_dir()/librespot`; audio under
+/// `%LOCALAPPDATA%\cadence\cache\audio`, capped at 1 GiB (librespot prunes the oldest files).
+/// A track played once is never downloaded again while it stays in the cache.
 pub fn librespot_cache() -> Cache {
     let dir = data_dir().join("librespot");
-    Cache::new(Some(dir.clone()), Some(dir), None, None).unwrap_or_else(|e| {
+    let audio = crate::cache::dir("audio");
+    Cache::new(Some(dir.clone()), Some(dir), Some(audio), Some(1 << 30)).unwrap_or_else(|e| {
         eprintln!("auth: librespot cache disabled: {e}");
         Cache::new(None::<PathBuf>, None, None, None).expect("cache without paths cannot fail")
     })

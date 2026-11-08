@@ -3,6 +3,7 @@
 import { Theme } from "theme.slint";
 import { Cover } from "cover.slint";
 import { ScrollView, ListView, Palette } from "std-widgets.slint";
+import { Icons } from "now_playing.slint";
 
 export struct Card {
     title: string,
@@ -36,6 +37,8 @@ export global Browse {
     // Home
     in property <[Card]> recent;
     in property <[Card]> playlists;
+    // The sidebar's playlist list (title + uri only), filled once per launch.
+    in property <[Card]> side-playlists;
 
     // Search
     in property <[TrackRow]> found-tracks;
@@ -340,20 +343,43 @@ component PlaylistRow inherits Rectangle {
     }
 }
 
+component NavIcon inherits Path {
+    in property <color> tint;
+    width: 20px;
+    height: 20px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: transparent;
+    stroke: root.tint;
+    stroke-width: 1.75px * 20 / 24;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+}
+
 component NavItem inherits Rectangle {
     in property <string> label;
+    in property <string> icon;
     in property <bool> selected;
+    in property <length> item-height: 40px;
+    in property <bool> quiet;
     callback clicked();
-    height: 40px;
+    height: root.item-height;
     border-radius: Theme.radius-control;
     background: ta.pressed ? Theme.pressed : (root.selected ? Theme.surface-raised : (ta.has-hover ? Theme.hover : transparent));
     animate background { duration: Theme.duration-fast; }
-    Label {
+    NavIcon {
         x: Theme.space-md;
         y: (parent.height - self.height) / 2;
-        width: parent.width - 2 * Theme.space-md;
+        commands: root.icon;
+        tint: root.selected || ta.has-hover ? Theme.text : Theme.text-secondary;
+        animate tint { duration: Theme.duration-fast; }
+    }
+    Label {
+        x: Theme.space-md + 20px + Theme.space-md;
+        y: (parent.height - self.height) / 2;
+        width: parent.width - self.x - Theme.space-md;
         text: root.label;
-        font-weight: Theme.weight-medium;
+        font-weight: root.quiet ? Theme.weight-regular : Theme.weight-medium;
         color: root.selected ? Theme.text : Theme.text-secondary;
         animate color { duration: Theme.duration-fast; }
     }
@@ -362,7 +388,7 @@ component NavItem inherits Rectangle {
     }
 }
 
-// Fixed 216 px wide.
+// Fixed 216 px wide: navigation, then the user's playlists.
 export component Sidebar inherits Rectangle {
     width: 216px;
     background: Theme.bg;
@@ -389,20 +415,46 @@ export component Sidebar inherits Rectangle {
         Rectangle { height: Theme.space-md; }
         NavItem {
             label: "Home";
+            icon: Icons.home;
             selected: Browse.page == "home";
             clicked => { Browse.go-home(); }
         }
         NavItem {
             label: "Search";
+            icon: Icons.search;
             selected: Browse.page == "search";
             clicked => { Browse.go-search(); }
         }
         NavItem {
             label: "Liked Songs";
+            icon: Icons.heart;
             selected: Browse.page == "list" && Browse.list-kind == "liked";
             clicked => { Browse.open("liked"); }
         }
-        Rectangle { vertical-stretch: 1; }
+        if Browse.side-playlists.length > 0 : Rectangle {
+            height: Theme.space-xl + 12px;
+            Rectangle { x: Theme.space-md; y: Theme.space-md; width: parent.width - 2 * Theme.space-md; height: 1px; background: Theme.divider; }
+            Label {
+                x: Theme.space-md;
+                y: Theme.space-md + 10px;
+                text: "Playlists";
+                font-size: Theme.size-caption;
+                letter-spacing: Theme.tracking-caption;
+                color: Theme.text-tertiary;
+            }
+        }
+        ListView {
+            vertical-stretch: 1;
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+            for p in Browse.side-playlists : NavItem {
+                item-height: 34px;
+                quiet: true;
+                label: p.title;
+                icon: Icons.playlist;
+                selected: Browse.page == "list" && Browse.list-uri == p.uri;
+                clicked => { Browse.open(p.uri); }
+            }
+        }
     }
 }
 

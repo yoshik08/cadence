@@ -243,6 +243,37 @@ pub struct Lyrics {
     pub lines: Vec<LyricLine>,
 }
 
+impl Lyrics {
+    /// Compact JSON for the disk cache.
+    pub fn to_json(&self) -> String {
+        let lines: Vec<Value> = self
+            .lines
+            .iter()
+            .map(|l| serde_json::json!({ "t": l.start_ms, "x": l.text, "w": l.words, "e": l.ends }))
+            .collect();
+        serde_json::json!({ "synced": self.synced, "word": self.word_sync, "lines": lines }).to_string()
+    }
+
+    pub fn from_json(data: &[u8]) -> Option<Lyrics> {
+        let v: Value = serde_json::from_slice(data).ok()?;
+        let nums = |x: &Value| -> Vec<u32> {
+            x.as_array().map_or(Vec::new(), |a| a.iter().filter_map(|n| n.as_u64().map(|n| n as u32)).collect())
+        };
+        let lines = v
+            .get("lines")?
+            .as_array()?
+            .iter()
+            .map(|l| LyricLine {
+                start_ms: l["t"].as_u64().unwrap_or(0) as u32,
+                text: l["x"].as_str().unwrap_or("").to_string(),
+                words: nums(&l["w"]),
+                ends: nums(&l["e"]),
+            })
+            .collect();
+        Some(Lyrics { synced: v["synced"].as_bool()?, word_sync: v["word"].as_bool().unwrap_or(false), lines })
+    }
+}
+
 impl Player {
     /// Lyrics pipeline ported from yoshik.xyz/api/lyrics.js (its line and word modes combined):
     /// 1. Spotify internal color-lyrics via the librespot session. The site has no equivalent;
@@ -264,32 +295,26 @@ impl Player {
         album: &str,
         duration_ms: u32,
     ) -> Option<Lyrics> {
-        // 1. Spotify internal lyrics (Hermes spclient)
-        if let Some(l) = self.spotify_lyrics(uri).await {
-            if l.synced && !l.lines.is_empty() {
-                return Some(l);
-            }
-        }
+        // 1. Spotify internal lyrics (Hermes spclient). Kept for the unsynced fallback below
+        // instead of being fetched a second time.
+        let spotify = self.spotify_lyrics(uri).await;
+        lyrics_pipeline(spotify, title, artist, album, duration_ms).await
+    }
 
-        let cleaned = clean_title(title);
-
-        // 2. Word race, then 3. line race — cleaned title first, raw title as retry.
-        let mut query = cleaned.as_str();
-        loop {
-            if let Some(l) = fetch_word(query, artist, duration_ms).await {
-                return Some(l);
-            }
-            if let Some(l) = fetch_line(query, artist, album, duration_ms).await {
-                return Some(l);
-            }
-            if query == title {
-                break;
-            }
-            query = title;
-        }
-
-        // Fallback: unsynced Spotify lyrics if any
-        self.spotify_lyrics(uri).await
+    /// The track's ISRC from Spotify metadata (Apple Music lookup by ISRC is exact).
+    #[cfg_attr(not(feature = "karaoke"), allow(dead_code))]
+    pub async fn isrc(&self, uri: &str) -> Option<String> {
+        use librespot_metadata::{Metadata, Track};
+        let uri = SpotifyUri::from_uri(uri).ok()?;
+        let track = tokio::time::timeout(Duration::from_secs(8), Track::get(&self.session, &uri))
+            .await
+            .ok()?
+            .ok()?;
+        track
+            .external_ids
+            .iter()
+            .find(|e| e.external_type.eq_ignore_ascii_case("isrc"))
+            .map(|e| e.id.clone())
     }
 
     async fn spotify_lyrics(&self, uri: &str) -> Option<Lyrics> {
@@ -306,6 +331,38 @@ impl Player {
         parse_spotify_lyrics(&body)
     }
 }
+
+/// Steps 2-5 of the pipeline (everything after Spotify's own lyrics, which the caller passes in).
+pub async fn lyrics_pipeline(
+    spotify: Option<Lyrics>,
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration_ms: u32,
+) -> Option<Lyrics> {
+    if spotify.as_ref().is_some_and(|l| l.synced && !l.lines.is_empty()) {
+        return spotify;
+    }
+    let cleaned = clean_title(title);
+    // 2. Word race, then 3. line race — cleaned title first, raw title as retry.
+    let mut query = cleaned.as_str();
+    loop {
+        if let Some(l) = fetch_word(query, artist, duration_ms).await {
+            return Some(l);
+        }
+        if let Some(l) = fetch_line(query, artist, album, duration_ms).await {
+            return Some(l);
+        }
+        if query == title {
+            break;
+        }
+        query = title;
+    }
+
+    // Fallback: unsynced Spotify lyrics if any
+    spotify
+}
+
 
 fn http() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -522,8 +579,6 @@ async fn lrcmux(title: &str, artist: &str, duration_ms: u32, word: bool) -> Opti
     let body = r.text().await.ok()?;
     let v: Value = serde_json::from_str(&body).ok()?;
     let track = v.get("track")?;
-    let meta = v.get("meta")?;
-    let _ = meta;
     let lines_arr = v.get("lines")?.as_array()?;
     if lines_arr.is_empty() {
         return None;
@@ -594,7 +649,7 @@ const NETEASE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 /// title/artist + closest duration (<= 3000 ms), then YRC word lyrics, else LRC lines.
 async fn netease(title: &str, artist: &str, duration_ms: u32) -> Option<Lyrics> {
     let primary_artist = artist.split(',').next().unwrap_or(artist).trim();
-    let clean_t = title.replace('\'', "'");
+    let clean_t = title.replace(['\u{2019}', '\u{2018}'], "'");
     let q = format!("{} {}", clean_t, primary_artist);
     let sr = http()
         .get("https://music.163.com/api/cloudsearch/pc")
@@ -1145,14 +1200,16 @@ fn push_word_line(
     if text.is_empty() || text == "♪" {
         return;
     }
+    // Word timings belong to the whole provider line: keep them only when it stays one line.
+    let split = text.contains('\n');
     for sub in text.split('\n') {
         let sub = sub.trim();
         if !sub.is_empty() && sub != "♪" {
             lines.push(LyricLine {
                 start_ms,
                 text: sub.to_string(),
-                words: words.clone(),
-                ends: ends.clone(),
+                words: if split { Vec::new() } else { words.clone() },
+                ends: if split { Vec::new() } else { ends.clone() },
             });
         }
     }

@@ -1,0 +1,707 @@
+// The lyrics page: a port of the yoshik.xyz lyrics overlay (lyrics.css + karaoke.css).
+// Full window. Classic view: blurred art, cover + title + artist + progress on the left, lines on
+// the right with the active line centred. Karaoke view (dev builds with an Apple Music token only):
+// one focus word at a time on a near-black stage.
+//
+// Rust (src/lyrics_view.rs) does all text measuring, wrapping and timing: every line arrives with
+// its rows already wrapped for the current window and with its exact height and offset, so the
+// scroll target is known without measuring anything here. Rust also drives `lyric-ms`, the
+// active line and the karaoke word slots.
+import { Playback, LyrLine, KWord, Icons } from "now_playing.slint";
+
+// Geometry shared with Rust (lyrics_view::Geometry). Change both together.
+export global LyrGeo {
+    public pure function pad-x(w: length) -> length { return w * 0.06; }
+    public pure function side-w(w: length) -> length { return min(w * 0.38, 540px); }
+    public pure function size(w: length) -> length { return clamp(w * 0.029, 22px, 34px); }
+    public pure function active-size(w: length) -> length { return clamp(w * 0.04, 30px, 48px); }
+}
+
+component Glyph inherits Path {
+    in property <length> size: 14px;
+    in property <color> tint: #ffffff;
+    in property <float> stroke-w: 2;
+    width: root.size;
+    height: root.size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: transparent;
+    stroke: root.tint;
+    stroke-width: root.stroke-w * root.size / 24px * 1px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+}
+
+// .karaoke-toggle: a 38px pill. `active` is the white state.
+component Pill inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> active;
+    callback clicked;
+    height: 38px;
+    width: row.preferred-width;
+    border-radius: 19px;
+    border-width: 1px;
+    border-color: root.active ? #ffffff : #ffffff24;
+    background: root.active ? #ffffff : ta.has-hover ? #ffffff2e : #ffffff14;
+    animate background, border-color { duration: 200ms; easing: ease; }
+    row := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 6px;
+        alignment: center;
+        Glyph {
+            y: (parent.height - self.height) / 2;
+            commands: root.icon;
+            tint: root.active ? #000000 : #ffffff;
+        }
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            font-family: "Bricolage Grotesque";
+            font-size: 13px;
+            font-weight: 500;
+            color: root.active ? #000000 : #ffffff;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component NudgeButton inherits Rectangle {
+    in property <string> label;
+    callback clicked;
+    width: 32px;
+    background: ta.has-hover ? #ffffff1f : transparent;
+    animate background { duration: 150ms; }
+    Text {
+        text: root.label;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-family: "Bricolage Grotesque";
+        font-size: 15px;
+        font-weight: 500;
+        color: #ffffff;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// .sync-group: [−][⟳ Sync][+]. − shows lyrics 50 ms later, + 50 ms earlier, Sync resets.
+component SyncGroup inherits Rectangle {
+    property <bool> custom: Playback.nudge-ms != 0;
+    property <string> resting: (Playback.karaoke ? "K " : "") + "Sync";
+    height: 38px;
+    width: minus.width + mid.width + plus.width;
+    border-radius: 19px;
+    border-width: 1px;
+    border-color: #ffffff24;
+    background: #ffffff14;
+    clip: true;
+    minus := NudgeButton {
+        x: 0;
+        height: parent.height;
+        label: "−";
+        clicked => { Playback.nudge(-50); }
+    }
+    mid := Rectangle {
+        x: minus.width;
+        height: parent.height;
+        width: max(74px, mid-row.preferred-width);
+        background: Playback.sync-flash ? #ffffff : root.custom ? #ffd84d1f : mid-ta.has-hover ? #ffffff1f : transparent;
+        Rectangle { x: 0; width: 1px; background: #ffffff24; }
+        Rectangle { x: parent.width - 1px; width: 1px; background: #ffffff24; }
+        mid-row := HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            spacing: 6px;
+            alignment: center;
+            Glyph {
+                y: (parent.height - self.height) / 2;
+                commands: Icons.sync;
+                tint: Playback.sync-flash ? #000000 : root.custom ? #ffd84d : #ffffff;
+            }
+            Text {
+                text: Playback.sync-flash ? "✓" : root.custom ? ((Playback.karaoke ? "K " : "") + (Playback.nudge-ms > 0 ? "+" : "") + Playback.nudge-ms + "ms") : root.resting;
+                vertical-alignment: center;
+                font-family: "Bricolage Grotesque";
+                font-size: 13px;
+                font-weight: 500;
+                color: Playback.sync-flash ? #000000 : root.custom ? #ffd84d : #ffffff;
+            }
+        }
+        mid-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { Playback.sync-reset(); }
+        }
+    }
+    plus := NudgeButton {
+        x: minus.width + mid.width;
+        height: parent.height;
+        label: "+";
+        clicked => { Playback.nudge(50); }
+    }
+}
+
+component CloseButton inherits Rectangle {
+    callback clicked;
+    width: 38px;
+    height: 38px;
+    border-radius: 19px;
+    border-width: 1px;
+    border-color: #ffffff24;
+    background: ta.has-hover ? #ffffff2e : #ffffff14;
+    animate background { duration: 150ms; }
+    Glyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        size: 14px;
+        commands: "M6 6L18 18M18 6L6 18";
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// One lyric line (.lyr-line). Rows come pre-wrapped from Rust; the active line uses the larger
+// rows (`arows`), or per-letter rows (`wrows`) when it has word timings. Past lines .45 white,
+// upcoming .32, active white; unlit letters of the active line .35 and light as `lyric-ms` passes.
+component LyricLineView inherits Rectangle {
+    in property <LyrLine> line;
+    in property <int> state; // -1 past, 0 active, 1 upcoming, 2 unsynced
+    in property <length> size;
+    in property <length> active-size;
+    // Where the line's centre sits in the column (0 = top edge) and the column height: lines fade
+    // out over the top 10% and bottom 8%, like the site's mask-image (per line, no overlay bands).
+    in property <length> centre-y;
+    in property <length> view-h;
+    callback clicked;
+    opacity: max(0, min(1, min(root.centre-y / (root.view-h * 0.10), (root.view-h - root.centre-y) / (root.view-h * 0.08))));
+    property <bool> on: root.state == 0;
+    property <length> fs: root.on ? root.active-size : root.size;
+    property <length> lh: root.fs * 1.35;
+    property <color> tone: root.on ? #ffffff : root.state == 1 ? #ffffff52 : #ffffff73;
+    height: root.on ? root.line.ah : root.line.h;
+
+    if !root.on || root.line.wrows.length == 0 : Rectangle {
+        for row[k] in (root.on ? root.line.arows : root.line.rows) : Text {
+            x: 0;
+            y: 16px + k * root.lh;
+            height: root.lh;
+            text: row;
+            vertical-alignment: center;
+            font-family: "Bricolage Grotesque 36pt SemiCondensed";
+            font-weight: 700;
+            font-size: root.fs;
+            letter-spacing: -0.015 * root.fs;
+            color: root.tone;
+            animate color { duration: 120ms; easing: ease; }
+        }
+    }
+    if root.on && root.line.wrows.length > 0 : Rectangle {
+        for wrow[k] in root.line.wrows : HorizontalLayout {
+            x: 0;
+            y: 16px + k * root.lh;
+            height: root.lh;
+            spacing: 0;
+            alignment: start;
+            for word in wrow.words : HorizontalLayout {
+                spacing: -0.015 * root.fs;
+                for letter in word.letters : Text {
+                    text: letter.ch;
+                    vertical-alignment: center;
+                    font-family: "Bricolage Grotesque 36pt SemiCondensed";
+                    font-weight: 700;
+                    font-size: root.fs;
+                    // Lights instantly: an 80 ms fade would cost a dozen full-window repaints per letter.
+                    color: Playback.lyric-ms >= letter.at ? #ffffff : #ffffff59;
+                }
+                if word.space : Text {
+                    text: " ";
+                    font-family: "Bricolage Grotesque 36pt SemiCondensed";
+                    font-weight: 700;
+                    font-size: root.fs;
+                }
+            }
+        }
+    }
+    TouchArea {
+        enabled: root.state != 2;
+        mouse-cursor: root.state != 2 ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+// .lyrics-lines: the column scrolls so the active line sits at the vertical centre (padding of
+// half the height above the first line and below the last). Smooth scroll on line change; a wheel
+// scroll pauses following for 3 s (lyrUserScrollAt in script.js).
+component LyricsColumn inherits Rectangle {
+    in property <length> size;
+    in property <length> active-size;
+    property <int> active: Playback.lyr-active;
+    property <length> content-h: Playback.lyr-total-h + root.height;
+    // The scroll target for the active line (0 = first line at the centre).
+    property <length> follow: root.active >= 0 && root.active < Playback.lyr-lines.length
+        ? -(Playback.lyr-lines[root.active].top + Playback.lyr-lines[root.active].ah / 2)
+        : 0px;
+    property <length> offset;
+    property <bool> paused;
+    property <duration> resume-at;
+    clip: true;
+
+    changed follow => {
+        if (!root.paused) {
+            root.offset = root.follow;
+        }
+    }
+    init => { root.offset = root.follow; }
+
+    Timer {
+        interval: 250ms;
+        running: root.paused;
+        triggered => {
+            if (animation-tick() >= root.resume-at) {
+                root.paused = false;
+                root.offset = root.follow;
+            }
+        }
+    }
+
+    TouchArea {
+        scroll-event(e) => {
+            root.paused = true;
+            root.resume-at = animation-tick() + 3s;
+            root.offset = clamp(root.offset + e.delta-y, -Playback.lyr-total-h, 0px);
+            return accept;
+        }
+    }
+
+    content := Rectangle {
+        x: 0;
+        y: root.height / 2 + root.offset;
+        width: parent.width;
+        height: Playback.lyr-total-h;
+        animate y { duration: 500ms; easing: cubic-bezier(0.25, 0.1, 0.25, 1); }
+        VerticalLayout {
+            alignment: start;
+            spacing: 0;
+            for line[i] in Playback.lyr-lines : LyricLineView {
+                line: line;
+                centre-y: content.y + self.y + self.height / 2;
+                view-h: root.height;
+                size: root.size;
+                active-size: root.active-size;
+                state: !Playback.lyr-synced ? 2 : i < root.active ? -1 : i == root.active ? 0 : 1;
+                clicked => {
+                    root.paused = false;
+                    Playback.seek(line.start-ms);
+                }
+            }
+        }
+    }
+}
+
+// One karaoke word (.vk-w): highlight box, text, optional glyph. Every number comes from Rust.
+component KaraokeWord inherits Rectangle {
+    in property <KWord> w;
+    property <length> em: root.w.size;
+    // Element box: the text plus padding .1em .28em .14em, line-height 1.
+    property <length> bw: t.preferred-width + 0.56 * root.em;
+    property <length> bh: 1.24 * root.em;
+    property <length> bx: root.w.x - root.bw / 2;
+    property <length> by: root.w.y - root.bh / 2;
+    visible: root.w.opacity > 0.01;
+    opacity: root.w.opacity;
+
+    // .vk-hl: inset .03em .05em .05em, radius .22em, scaled around 28% 60%.
+    property <length> hw: root.bw - 0.1 * root.em;
+    property <length> hh: root.bh - 0.08 * root.em;
+    property <length> hx0: root.bx + 0.05 * root.em;
+    property <length> hy0: root.by + 0.03 * root.em;
+    Rectangle {
+        visible: root.w.hl > 0.001;
+        opacity: root.w.hl;
+        x: root.hx0 + root.hw * 0.28 * (1 - root.w.hl-sx) + root.w.hl-dx * root.em;
+        y: root.hy0 + root.hh * 0.6 * (1 - root.w.hl-sy);
+        width: root.hw * root.w.hl-sx;
+        height: root.hh * root.w.hl-sy;
+        border-radius: 0.22 * root.em * root.w.hl-sy;
+        background: Playback.k-highlight;
+    }
+    t := Text {
+        x: root.w.x - self.width / 2;
+        y: root.w.y - self.height / 2;
+        text: root.w.text;
+        font-family: "Bricolage Grotesque 96pt SemiCondensed";
+        font-weight: 800;
+        font-size: root.em;
+        letter-spacing: -0.05 * root.em;
+        color: root.w.color;
+    }
+    if root.w.icon != "" : Path {
+        property <length> s: 0.82 * root.em * root.w.icon-scale;
+        x: root.w.icon-left ? root.bx + 0.1 * root.em - 0.41 * root.em - self.s / 2 : root.bx + root.bw - 0.1 * root.em + 0.41 * root.em - self.s / 2;
+        y: root.w.y - self.s / 2;
+        width: self.s;
+        height: self.s;
+        opacity: root.w.hl;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.w.icon;
+        fill: transparent;
+        stroke: Playback.k-highlight;
+        stroke-width: 2.3 * self.s / 24px * 1px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+}
+
+component SegButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> pressed;
+    callback clicked;
+    width: txt.preferred-width + 24px;
+    height: 30px;
+    border-radius: 9px;
+    background: root.pressed ? #ffffff : transparent;
+    animate background { duration: 200ms; }
+    txt := Text {
+        text: root.label;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-family: "JetBrains Mono";
+        font-weight: 500;
+        font-size: 12px;
+        letter-spacing: 0.24px;
+        color: root.pressed ? #08080a : ta.has-hover ? #ffffff : #ffffffb3;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A colour swatch: click cycles through a palette (Rust), right-click goes back.
+component Swatch inherits HorizontalLayout {
+    in property <string> name;
+    in property <color> value;
+    spacing: 7px;
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 22px;
+        height: 22px;
+        border-radius: 11px;
+        border-width: 2px;
+        border-color: #ffffff47;
+        background: root.value;
+        TouchArea {
+            mouse-cursor: pointer;
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.up) {
+                    Playback.cycle-color(root.name, e.button == PointerEventButton.right ? -1 : 1);
+                }
+            }
+        }
+    }
+    Text {
+        text: root.name;
+        vertical-alignment: center;
+        font-family: "JetBrains Mono";
+        font-weight: 500;
+        font-size: 12px;
+        color: #ffffffb3;
+    }
+}
+
+// .vk-settings: style segment + palette + reset.
+component KaraokeSettings inherits Rectangle {
+    height: 46px;
+    width: bar.preferred-width;
+    border-radius: 18px;
+    border-width: 1px;
+    border-color: #ffffff1a;
+    background: #141418b8;
+    bar := HorizontalLayout {
+        padding: 8px;
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 14px;
+        Rectangle {
+            width: seg.preferred-width;
+            border-radius: 12px;
+            background: #ffffff0f;
+            seg := HorizontalLayout {
+                padding: 0px;
+                spacing: 2px;
+                SegButton { label: "Ship"; pressed: Playback.k-style == "ship"; clicked => { Playback.set-k-style("ship"); } }
+                SegButton { label: "Fisheye"; pressed: Playback.k-style == "fisheye"; clicked => { Playback.set-k-style("fisheye"); } }
+                SegButton { label: "Fisheye Visual"; pressed: Playback.k-style == "fisheye-visual"; clicked => { Playback.set-k-style("fisheye-visual"); } }
+                SegButton { label: "Visual"; pressed: Playback.k-style == "visual"; clicked => { Playback.set-k-style("visual"); } }
+            }
+        }
+        Swatch { name: "lyric"; value: Playback.k-lyric; }
+        Swatch { name: "highlight"; value: Playback.k-highlight; }
+        Swatch { name: "secondary"; value: Playback.k-secondary; }
+        Rectangle {
+            width: reset.preferred-width + 20px;
+            reset := Text {
+                text: "reset";
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                font-family: "JetBrains Mono";
+                font-weight: 500;
+                font-size: 12px;
+                color: reset-ta.has-hover ? #ffffff : #ffffffb3;
+            }
+            reset-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { Playback.reset-k-colors(); }
+            }
+        }
+    }
+}
+
+export component LyricsOverlay inherits Rectangle {
+    property <bool> karaoke: Playback.karaoke;
+    property <length> pad: LyrGeo.pad-x(root.width);
+    property <length> side: LyrGeo.side-w(root.width);
+    property <length> col-x: root.pad + root.side + root.pad;
+    // .lyrics-side block: art, 18 gap, title, 5, artist, 20, 5px progress.
+    property <length> side-h: root.side + 18px + 22px + 5px + 18px + 20px + 5px;
+    // Karaoke chrome hides after 3 s without pointer movement.
+    property <bool> idle;
+    property <duration> moved-at;
+    changed karaoke => { root.idle = false; root.moved-at = animation-tick(); }
+
+    opacity: Playback.expanded ? 1 : 0;
+    visible: self.opacity > 0.01;
+    animate opacity { duration: 350ms; easing: ease; }
+    background: root.karaoke ? #050507 : #08080a;
+
+    // Swallow clicks so nothing behind the overlay reacts; track the pointer for the idle fade.
+    TouchArea {
+        mouse-cursor: (root.karaoke && root.idle) ? MouseCursor.none : MouseCursor.default;
+        changed mouse-x => { root.idle = false; root.moved-at = animation-tick(); }
+        changed mouse-y => { root.idle = false; root.moved-at = animation-tick(); }
+    }
+    Timer {
+        interval: 500ms;
+        running: root.karaoke && !root.idle && Playback.expanded;
+        triggered => {
+            if (animation-tick() - root.moved-at >= 3s) {
+                root.idle = true;
+            }
+        }
+    }
+
+    // ---- classic view --------------------------------------------------------------------
+    if !root.karaoke : Rectangle {
+        // .lyrics-bg: the art blurred (Rust pre-blurs and darkens a tiny copy; the scaler smooths it).
+        // .lyrics-bg + .lyrics-vignette: one pre-rendered image (see art::blurred_bg).
+        Image {
+            x: -40px;
+            y: -40px;
+            width: parent.width + 80px;
+            height: parent.height + 80px;
+            source: Playback.bg-art;
+            image-fit: cover;
+            image-rendering: smooth;
+        }
+
+        // .lyrics-side
+        Rectangle {
+            x: root.pad;
+            y: (parent.height - root.side-h) / 2;
+            width: root.side;
+            height: root.side-h;
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: root.side;
+                height: root.side;
+                border-radius: 14px;
+                drop-shadow-offset-y: 24px;
+                drop-shadow-blur: 70px;
+                drop-shadow-color: #0000008c;
+                background: Playback.side-art.width > 0 ? transparent : #1a1a1e;
+                Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: Playback.side-art;
+                    image-fit: cover;
+                }
+            }
+            Text {
+                x: 0;
+                y: root.side + 18px;
+                width: root.side;
+                height: 22px;
+                text: Playback.title;
+                overflow: elide;
+                vertical-alignment: center;
+                font-family: "Bricolage Grotesque";
+                font-weight: 600;
+                font-size: 17px;
+                color: #ffffff;
+            }
+            Text {
+                x: 0;
+                y: root.side + 18px + 22px + 5px;
+                width: root.side;
+                height: 18px;
+                text: Playback.artist;
+                overflow: elide;
+                vertical-alignment: center;
+                font-size: 14px;
+                color: #ffffff8c;
+            }
+            Rectangle {
+                x: 0;
+                y: root.side-h - 5px;
+                width: root.side;
+                height: 5px;
+                border-radius: 2.5px;
+                background: #ffffff24;
+                Rectangle {
+                    x: 0;
+                    width: Playback.duration-ms > 0 ? parent.width * clamp(Playback.position-ms / Playback.duration-ms, 0, 1) : 0px;
+                    border-radius: 2.5px;
+                    background: #ffffffd9;
+                }
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        if (Playback.duration-ms > 0) {
+                            Playback.seek(Math.round(clamp(self.mouse-x / parent.width, 0, 1) * Playback.duration-ms));
+                        }
+                    }
+                }
+            }
+        }
+
+        // .lyrics-lines
+        LyricsColumn {
+            x: root.col-x;
+            y: 24px;
+            width: max(0px, root.width - root.col-x - root.pad);
+            height: parent.height - 48px;
+            size: LyrGeo.size(root.width);
+            active-size: LyrGeo.active-size(root.width);
+        }
+    }
+
+    // ---- karaoke view --------------------------------------------------------------------
+    if root.karaoke : Rectangle {
+        // .vk-glow + vignette: one pre-rendered image (see art::karaoke_bg).
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: Playback.k-bg;
+            image-fit: fill;
+            image-rendering: smooth;
+        }
+        for w in Playback.k-words : KaraokeWord { w: w; }
+
+        // .vk-meta
+        Rectangle {
+            x: 22px;
+            y: parent.height - 22px - 44px;
+            width: min(parent.width * 0.34, 44px + 12px + max(mt.preferred-width, ma.preferred-width));
+            height: 44px;
+            opacity: root.idle ? 0 : 1;
+            animate opacity { duration: 350ms; easing: ease; }
+            Image {
+                x: 0;
+                width: 44px;
+                height: 44px;
+                source: Playback.thumb-art;
+            }
+            mt := Text {
+                x: 56px;
+                y: 4px;
+                width: parent.width - 56px;
+                text: Playback.title;
+                overflow: elide;
+                font-family: "Bricolage Grotesque";
+                font-weight: 600;
+                font-size: 14px;
+                color: #ffffff;
+            }
+            ma := Text {
+                x: 56px;
+                y: 24px;
+                width: parent.width - 56px;
+                text: Playback.artist;
+                overflow: elide;
+                font-size: 12px;
+                color: #ffffff8c;
+            }
+        }
+        // .vk-prog
+        Rectangle {
+            y: parent.height - 3px;
+            height: 3px;
+            background: #ffffff0f;
+            Rectangle {
+                x: 0;
+                width: Playback.duration-ms > 0 ? parent.width * clamp(Playback.position-ms / Playback.duration-ms, 0, 1) : 0px;
+                background: Playback.k-highlight;
+            }
+        }
+        KaraokeSettings {
+            x: (parent.width - self.width) / 2;
+            y: parent.height - 22px - self.height;
+            opacity: root.idle ? 0 : 1;
+            animate opacity { duration: 350ms; easing: ease; }
+        }
+    }
+
+    // ---- controls (.lyrics-controls) -----------------------------------------------------
+    HorizontalLayout {
+        x: root.width - 28px - self.width;
+        y: 22px;
+        width: self.preferred-width;
+        height: 38px;
+        spacing: 12px;
+        opacity: (root.karaoke && root.idle) ? 0 : 1;
+        animate opacity { duration: 300ms; easing: ease; }
+        SyncGroup { }
+        Pill {
+            label: "Headphones";
+            icon: Icons.headphones;
+            active: Playback.headphones;
+            clicked => { Playback.toggle-headphones(); }
+        }
+        if Playback.karaoke-allowed : Pill {
+            label: "Karaoke";
+            icon: Icons.mic;
+            active: Playback.karaoke;
+            opacity: Playback.karaoke-available ? 1 : 0.4;
+            clicked => {
+                if (Playback.karaoke-available) {
+                    Playback.set-karaoke(!Playback.karaoke);
+                }
+            }
+        }
+        CloseButton {
+            clicked => { Playback.expanded = false; }
+        }
+    }
+
+    // .lyrics-hint
+    if Playback.lyr-hint != "" : Text {
+        x: 20px;
+        y: parent.height - 26px - 18px;
+        width: parent.width - 40px;
+        height: 18px;
+        text: Playback.lyr-hint;
+        horizontal-alignment: center;
+        font-size: 12px;
+        color: #ffffff66;
+    }
+}

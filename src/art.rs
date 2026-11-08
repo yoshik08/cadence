@@ -96,9 +96,21 @@ async fn fetch(url: &str) -> Result<Body, String> {
             .build()
             .unwrap_or_default()
     });
+    // Spotify art URLs are immutable, so a copy on disk is good forever (pruned by size).
+    let name = crate::cache::key(url);
+    if let Some(bytes) = tokio::task::spawn_blocking({ let n = name.clone(); move || crate::cache::read("art", &n, None) })
+        .await
+        .ok()
+        .flatten()
+    {
+        return Ok(Arc::new(bytes));
+    }
     let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
     let resp = resp.error_for_status().map_err(|e| e.to_string())?;
-    Ok(Arc::new(resp.bytes().await.map_err(|e| e.to_string())?))
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let copy = bytes.clone();
+    tokio::task::spawn_blocking(move || crate::cache::write("art", &name, &copy));
+    Ok(Arc::new(bytes))
 }
 
 fn decode(data: &[u8], px: u32) -> Result<Art, String> {
@@ -239,4 +251,117 @@ fn hsl_to_rgb(hue: f32, sat: f32, l: f32) -> (f32, f32, f32) {
     };
     let m = l - c / 2.0;
     (r + m, g + m, b + m)
+}
+
+/// The `.lyrics-bg` look: the art blurred (CSS blur(70px) over a full window) and darkened to
+/// 45%. Made tiny on purpose: the renderer's smooth upscale does the rest of the blur.
+pub fn blurred_bg(buf: &SharedPixelBuffer<Rgb8Pixel>) -> SharedPixelBuffer<Rgb8Pixel> {
+    const N: usize = 40;
+    let (w, h) = (buf.width() as usize, buf.height() as usize);
+    let src = buf.as_slice();
+    let mut px = vec![[0f32; 3]; N * N];
+    for (i, p) in px.iter_mut().enumerate() {
+        let (dx, dy) = (i % N, i / N);
+        let (xa, xb) = (dx * w / N, ((dx + 1) * w / N).max(dx * w / N + 1).min(w));
+        let (ya, yb) = (dy * h / N, ((dy + 1) * h / N).max(dy * h / N + 1).min(h));
+        let mut s = [0f32; 3];
+        for y in ya..yb {
+            for x in xa..xb {
+                let c = src[y * w + x];
+                s[0] += c.r as f32;
+                s[1] += c.g as f32;
+                s[2] += c.b as f32;
+            }
+        }
+        let n = ((yb - ya) * (xb - xa)).max(1) as f32;
+        *p = [s[0] / n, s[1] / n, s[2] / n];
+    }
+    // Three box passes (radius 3) approximate a gaussian.
+    for _ in 0..3 {
+        for horizontal in [true, false] {
+            let old = px.clone();
+            for y in 0..N {
+                for x in 0..N {
+                    let mut s = [0f32; 3];
+                    for d in -3i32..=3 {
+                        let (sx, sy) = if horizontal {
+                            ((x as i32 + d).clamp(0, N as i32 - 1) as usize, y)
+                        } else {
+                            (x, (y as i32 + d).clamp(0, N as i32 - 1) as usize)
+                        };
+                        let c = old[sy * N + sx];
+                        s[0] += c[0];
+                        s[1] += c[1];
+                        s[2] += c[2];
+                    }
+                    px[y * N + x] = [s[0] / 7.0, s[1] / 7.0, s[2] / 7.0];
+                }
+            }
+        }
+    }
+    // Bilinear upsample to 256 px: the renderer scales the rest of the way with nearest
+    // neighbour, which would show 40 px blocks from the tiny copy.
+    const M: usize = 256;
+    let mut out = SharedPixelBuffer::<Rgb8Pixel>::new(M as u32, M as u32);
+    let at = |x: usize, y: usize| px[y.min(N - 1) * N + x.min(N - 1)];
+    for (i, o) in out.make_mut_slice().iter_mut().enumerate() {
+        let fx = ((i % M) as f32 + 0.5) * N as f32 / M as f32 - 0.5;
+        let fy = ((i / M) as f32 + 0.5) * N as f32 / M as f32 - 0.5;
+        let (x0, y0) = (fx.floor().max(0.0) as usize, fy.floor().max(0.0) as usize);
+        let (tx, ty) = ((fx - x0 as f32).clamp(0.0, 1.0), (fy - y0 as f32).clamp(0.0, 1.0));
+        let (a, b, c, d) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
+        // .lyrics-vignette, baked in (a full-window radial gradient costs a lot per repaint):
+        // radial-gradient(120% 90%, transparent 55%, rgba(0,0,0,.5)), for a ~16:10 window.
+        let u = ((i % M) as f32 + 0.5) / M as f32 - 0.5;
+        let v = (((i / M) as f32 + 0.5) / M as f32 - 0.5) / 0.625;
+        let t = ((u / 1.2).powi(2) + (v / 0.9).powi(2)).sqrt();
+        let shade = 1.0 - ((t - 0.55) / 0.45).clamp(0.0, 1.0) * 0.5;
+        let ch = |k: usize| {
+            let top = a[k] + (b[k] - a[k]) * tx;
+            let bot = c[k] + (d[k] - c[k]) * tx;
+            ((top + (bot - top) * ty) * 0.45 * shade).round().clamp(0.0, 255.0) as u8
+        };
+        *o = Rgb8Pixel { r: ch(0), g: ch(1), b: ch(2) };
+    }
+    out
+}
+
+/// The art with its corners cut in alpha (anti-aliased), `radius` as a fraction of the side.
+/// The software renderer ignores border-radius on images; this works over any background.
+pub fn rounded(buf: &SharedPixelBuffer<Rgb8Pixel>, radius: f32) -> SharedPixelBuffer<slint::Rgba8Pixel> {
+    let (w, h) = (buf.width() as usize, buf.height() as usize);
+    let r = radius * w.min(h) as f32;
+    let mut out = SharedPixelBuffer::<slint::Rgba8Pixel>::new(w as u32, h as u32);
+    let src = buf.as_slice();
+    for (i, o) in out.make_mut_slice().iter_mut().enumerate() {
+        let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
+        let cx = if x < r { r } else if x > w as f32 - r { w as f32 - r } else { x };
+        let cy = if y < r { r } else if y > h as f32 - r { h as f32 - r } else { y };
+        let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+        let a = (r - d + 0.5).clamp(0.0, 1.0);
+        let c = src[i];
+        *o = slint::Rgba8Pixel { r: c.r, g: c.g, b: c.b, a: (a * 255.0).round() as u8 };
+    }
+    out
+}
+
+/// The karaoke stage background (.vk + .vk-glow) as one 16:9 image: #050507, the highlight at 26%
+/// in an ellipse around the middle, then the vignette. Pre-rendered because two full-window
+/// radial gradients per frame would dominate the software renderer's repaint cost.
+pub fn karaoke_bg(r: u8, g: u8, b: u8) -> SharedPixelBuffer<Rgb8Pixel> {
+    const W: usize = 384;
+    const H: usize = 216;
+    let mut out = SharedPixelBuffer::<Rgb8Pixel>::new(W as u32, H as u32);
+    for (i, o) in out.make_mut_slice().iter_mut().enumerate() {
+        let (x, y) = (((i % W) as f32 + 0.5) / W as f32, ((i / W) as f32 + 0.5) / H as f32);
+        // radial-gradient(44% 38% at 50% 48%, highlight 26%, transparent 74%)
+        let tg = (((x - 0.5) / 0.44).powi(2) + ((y - 0.48) / 0.38).powi(2)).sqrt();
+        let glow = 0.26 * (1.0 - (tg / 0.74).clamp(0.0, 1.0));
+        // radial-gradient(120% 90%, transparent 55%, rgba(0,0,0,.55))
+        let tv = (((x - 0.5) / 1.2).powi(2) + ((y - 0.5) / 0.9).powi(2)).sqrt();
+        let shade = 1.0 - ((tv - 0.55) / 0.45).clamp(0.0, 1.0) * 0.55;
+        let ch = |base: f32, c: u8| ((base + (c as f32 - base) * glow) * shade).round().clamp(0.0, 255.0) as u8;
+        *o = Rgb8Pixel { r: ch(5.0, r), g: ch(5.0, g), b: ch(7.0, b) };
+    }
+    out
 }
