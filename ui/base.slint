@@ -9,6 +9,7 @@
 //   Card             a raised surface (menus, dialogs, overlays)
 //   SectionHeader    a section title with an optional action link
 //   TipArea, Tip     a TouchArea with a tooltip, and the one tooltip the window shows
+//   Link             text that underlines on hover and opens something
 //
 // Feedback timing is one value (Tokens.duration-fast, ease-out) for all of them.
 // Keyboard focus is opt-in (`focusable`), so adopting a component never changes how a screen
@@ -321,5 +322,46 @@ export component TipOverlay inherits Rectangle {
             text: Tip.text;
             color: Tokens.text-primary;
         }
+    }
+}
+
+// Text that underlines on hover and opens something. Disabled: plain text, no pointer, no
+// underline. Shrinks with an ellipsis when space runs out.
+export component Link inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <color> ink: Tokens.text-secondary;
+    in property <color> hover-ink: Tokens.text-primary;
+    in property <length> font-size: Tokens.size-caption;
+    in property <int> font-weight: Tokens.weight-regular;
+    callback clicked();
+    property <bool> hot: touch.has-hover && root.enabled;
+    min-width: 0px;
+    preferred-width: label.preferred-width;
+    max-width: label.preferred-width;
+    height: label.preferred-height;
+    horizontal-stretch: 1;
+    label := Text {
+        width: parent.width;
+        text: root.text;
+        font-family: Tokens.font-family;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        color: root.hot ? root.hover-ink : root.ink;
+        overflow: elide;
+        animate color { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+    }
+    // The underline sits just under the baseline.
+    Rectangle {
+        y: parent.height - Tokens.space-2xs;
+        height: Tokens.hairline;
+        width: parent.width;
+        background: root.hover-ink;
+        visible: root.hot;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
     }
 }

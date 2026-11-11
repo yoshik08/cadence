@@ -32,6 +32,15 @@ fn create(ui: &MainWindow) -> Option<(MiniWindow, slint::Timer)> {
             ui.global::<Playback>().set_volume(v);
         }
     });
+    // Links bring the main window back (restored and focused) and open the page there; the mini
+    // player stays open.
+    mini.on_open_uri(|uri| {
+        if uri.is_empty() {
+            return;
+        }
+        crate::show_main();
+        crate::browse::go(&uri);
+    });
     let w = mini.as_weak();
     mini.on_drag(move || {
         if let Some(m) = w.upgrade() {
@@ -102,6 +111,8 @@ fn sync_all(m: &MiniWindow, ui: &MainWindow) {
     let pb = ui.global::<Playback>();
     m.set_track_title(pb.get_title());
     m.set_artist(pb.get_artist());
+    m.set_album_uri(pb.get_album_uri());
+    m.set_artists(pb.get_artists());
     m.set_art_fresh(pb.get_art_fresh());
     m.set_art(pb.get_bar_art());
     m.set_playing(pb.get_playing());

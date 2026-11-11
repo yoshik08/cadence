@@ -2,7 +2,7 @@
 // the expanded view. Rust sets `position-ms` on player events; the bar's Timer only interpolates
 // between events. Nothing here takes keyboard focus.
 import { Tokens } from "tokens.slint";
-import { Glyph, IconButton } from "base.slint";
+import { Glyph, IconButton, Link } from "base.slint";
 import { Cover } from "cover.slint";
 
 
@@ -73,6 +73,12 @@ export struct KMotion {
     icon-rot: float,
 }
 
+// One credited artist of the playing track; `uri` empty when there is nothing to link to.
+export struct ArtistLink {
+    name: string,
+    uri: string,
+}
+
 export global Playback {
     in-out property <string> title;
     in-out property <string> artist;
@@ -109,6 +115,9 @@ export global Playback {
     in-out property <bool> expanded;
     // The context (playlist / album / liked) the current track was started from.
     in property <string> context-uri;
+    // Links for the playing track. The album link stays off until its ID is known.
+    in property <string> album-uri;
+    in property <[ArtistLink]> artists;
 
     // Lyrics page.
     in property <[LyrLine]> lyr-lines;
@@ -141,6 +150,8 @@ export global Playback {
     callback lyrics-offset(int);
     callback seek-line(int);
     callback open-artist();
+    // Opens a page (album / artist uri) from the bar or the mini player; never touches playback.
+    callback open-uri(string);
     callback speed-menu(length, length);
     callback sleep-menu(length, length);
     callback toggle-like();
@@ -190,6 +201,45 @@ export global Icons {
     out property <string> queue: "M3 6h13 M3 12h13 M3 18h9 M17 15v6l4-3z";
     out property <string> more: "M5 12h.01 M12 12h.01 M19 12h.01";
     out property <string> mic: "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z M19 10v2a7 7 0 0 1-14 0v-2 M12 19L12 22";
+}
+
+// "Artist A, Artist B": each name its own link, commas plain. A long list elides the names
+// that do not fit, and each visible name stays clickable. No links (local files, episodes):
+// the plain `fallback` text.
+export component ArtistLinks inherits HorizontalLayout {
+    in property <[ArtistLink]> artists;
+    in property <string> fallback;
+    in property <color> color: Tokens.text-secondary;
+    in property <length> font-size: Tokens.size-caption;
+    callback open(string);
+    spacing: 0px;
+    alignment: start;
+    if root.artists.length == 0 : Text {
+        text: root.fallback;
+        color: root.color;
+        font-size: root.font-size;
+        letter-spacing: Tokens.tracking-caption;
+        overflow: elide;
+        min-width: 0px;
+    }
+    for a[i] in root.artists : HorizontalLayout {
+        spacing: 0px;
+        min-width: 0px;
+        if i > 0 : Text {
+            text: ", ";
+            color: root.color;
+            font-size: root.font-size;
+            horizontal-stretch: 0;
+        }
+        Link {
+            text: a.name;
+            enabled: a.uri != "";
+            ink: root.color;
+            hover-ink: Tokens.text-primary;
+            font-size: root.font-size;
+            clicked => { root.open(a.uri); }
+        }
+    }
 }
 
 global Fmt {
@@ -355,53 +405,68 @@ export component NowPlayingBar inherits Rectangle {
         background: Tokens.border;
     }
 
-    // Left: art and track, click opens the full view.
-    Rectangle {
+    // Left: cover (opens / closes lyrics) | title (album) over artists (each its own page) | heart.
+    // One start-aligned row, so the heart sits right after the text, not at the section's end.
+    HorizontalLayout {
         x: Tokens.space-xl;
         y: (root.height - self.height) / 2;
         width: root.side-w;
         height: Tokens.art-thumb;
-        Cover {
-            x: 0;
-            y: 0;
+        spacing: Tokens.space-md;
+        alignment: start;
+        Rectangle {
             width: Tokens.art-thumb;
-            height: Tokens.art-thumb;
-            source: Playback.bar-art.width > 0 ? Playback.bar-art : Playback.art;
-            radius: Tokens.radius-md;
-            backdrop: Tokens.bg-base;
-            fade: Playback.art-fresh;
-            placeholder: root.idle ? Tokens.bg-surface : Tokens.art-placeholder;
-        }
-        VerticalLayout {
-            x: Tokens.art-thumb + Tokens.space-md;
-            width: parent.width - self.x;
-            alignment: center;
-            spacing: Tokens.space-2xs;
-            Text {
-                text: Playback.title;
-                color: Tokens.text-primary;
-                font-size: Tokens.size-body;
-                font-weight: Tokens.weight-semibold;
-                overflow: elide;
+            horizontal-stretch: 0;
+            Cover {
+                width: parent.width;
+                height: parent.height;
+                source: Playback.bar-art.width > 0 ? Playback.bar-art : Playback.art;
+                radius: Tokens.radius-md;
+                backdrop: Tokens.bg-base;
+                fade: Playback.art-fresh;
+                placeholder: root.idle ? Tokens.bg-surface : Tokens.art-placeholder;
             }
-            Text {
-                text: Playback.artist;
-                color: Tokens.text-secondary;
-                font-size: Tokens.size-caption;
-                letter-spacing: Tokens.tracking-caption;
-                overflow: elide;
-            }
-        }
-        TouchArea {
-            width: parent.width - (Playback.like-known ? Tokens.control-lg : 0px);
-            enabled: !root.idle;
-            mouse-cursor: MouseCursor.pointer;
-            clicked => { Playback.expanded = true; }
-            pointer-event(e) => {
-                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
-                    Playback.track-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            TouchArea {
+                enabled: !root.idle;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { Playback.expanded = !Playback.expanded; }
+                pointer-event(e) => {
+                    if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                        Playback.track-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                    }
                 }
             }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: Tokens.space-2xs;
+            min-width: 0px;
+            // Content width, up to what is left of the section.
+            max-width: self.preferred-width;
+            horizontal-stretch: 1;
+            Link {
+                text: Playback.title;
+                enabled: Playback.album-uri != "";
+                ink: Tokens.text-primary;
+                hover-ink: Tokens.text-bright;
+                font-size: Tokens.size-body;
+                font-weight: Tokens.weight-semibold;
+                clicked => { Playback.open-uri(Playback.album-uri); }
+            }
+            ArtistLinks {
+                artists: Playback.artists;
+                fallback: Playback.artist;
+                open(uri) => { Playback.open-uri(uri); }
+            }
+        }
+        if Playback.like-known && !root.idle : IconButton {
+            y: (parent.height - self.height) / 2;
+            horizontal-stretch: 0;
+            icon: Icons.heart;
+            solid: Playback.liked;
+            active: Playback.liked;
+            active-color: root.accent;
+            clicked => { Playback.toggle-like(); }
         }
     }
 
@@ -502,17 +567,6 @@ export component NowPlayingBar inherits Rectangle {
                 letter-spacing: Tokens.tracking-caption;
             }
         }
-    }
-
-    // Like the current track (Web API; hidden until its state is known).
-    if Playback.like-known && !root.idle : IconButton {
-        x: Tokens.space-xl + root.side-w - self.width;
-        y: (root.height - self.height) / 2;
-        icon: Icons.heart;
-        solid: Playback.liked;
-        active: Playback.liked;
-        active-color: root.accent;
-        clicked => { Playback.toggle-like(); }
     }
 
     // Right: volume (click the speaker to mute) and expand.

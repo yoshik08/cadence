@@ -35,6 +35,8 @@ pub enum Event {
         art_url: Option<String>,
         duration_ms: u32,
         explicit: bool,
+        /// (name, uri) of each credited artist, for links. Empty for local files and episodes.
+        artists: Vec<(String, String)>,
     },
     Playing { position_ms: u32 },
     Paused { position_ms: u32 },
@@ -369,6 +371,7 @@ impl Player {
                     album: t.album.name.clone(),
                     album_uri: t.album.id.to_uri().unwrap_or_default(),
                     artist_uri: t.artists.0.first().and_then(|a| a.id.to_uri().ok()).unwrap_or_default(),
+                    artists: t.artists.0.iter().map(|a| (unescape(&a.name), a.id.to_uri().unwrap_or_default())).collect(),
                     duration_ms: t.duration.max(0) as u32,
                     art_url: cover(&t.album.covers.0),
                     images: images(&t.album.covers.0),
@@ -415,6 +418,8 @@ pub struct ItemMeta {
     pub album: String,
     pub album_uri: String,
     pub artist_uri: String,
+    /// (name, uri) of every artist on the track.
+    pub artists: Vec<(String, String)>,
     pub duration_ms: u32,
     pub art_url: Option<String>,
     /// Cover sizes for rows (at most three; see `api::sizes`).
@@ -1461,6 +1466,10 @@ async fn map_events(
         }
         let out = match ev {
             PlayerEvent::TrackChanged { audio_item } => {
+                let links = match &audio_item.unique_fields {
+                    UniqueFields::Track { artists, .. } => artist_links(artists),
+                    _ => Vec::new(),
+                };
                 let (artist, album) = match &audio_item.unique_fields {
                     UniqueFields::Track { artists, album, .. } => {
                         (join_artists(artists), album.clone())
@@ -1487,6 +1496,7 @@ async fn map_events(
                     art_url,
                     duration_ms: audio_item.duration_ms,
                     explicit: audio_item.is_explicit,
+                    artists: links,
                 })
             }
             PlayerEvent::Playing { position_ms, .. }
@@ -1529,6 +1539,20 @@ async fn map_events(
             }
         }
     }
+}
+
+/// The credited artists (main and featured; everyone if none are marked) as (name, uri), in the
+/// order `join_artists` names them.
+fn artist_links(artists: &[librespot_metadata::artist::ArtistWithRole]) -> Vec<(String, String)> {
+    let pick = |all: bool| -> Vec<(String, String)> {
+        artists
+            .iter()
+            .filter(|a| all || matches!(a.role, ArtistRole::ARTIST_ROLE_MAIN_ARTIST | ArtistRole::ARTIST_ROLE_FEATURED_ARTIST))
+            .map(|a| (unescape(&a.name), a.id.to_uri().unwrap_or_default()))
+            .collect()
+    };
+    let main = pick(false);
+    if main.is_empty() { pick(true) } else { main }
 }
 
 fn join_artists(artists: &[librespot_metadata::artist::ArtistWithRole]) -> String {

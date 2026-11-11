@@ -244,6 +244,7 @@ pub fn play_pause_cmd() {
 pub fn show_restored(ui: &MainWindow, saved: &queue::Saved, m: &player::ItemMeta) {
     let seq = TRACK_GEN.fetch_add(1, Ordering::Relaxed) + 1;
     apply_track(ui, runtime(), seq, saved.track.clone(), m.title.clone(), m.artist.clone(), m.album.clone(), m.art_url.clone(), m.duration_ms);
+    set_links(ui, seq, &saved.track, m.artists.clone(), Some(m.album_uri.clone()));
     let pb = ui.global::<Playback>();
     pb.set_position_ms(saved.position_ms as i32);
     pb.set_playing(false);
@@ -424,6 +425,51 @@ async fn karaoke_for(uri: &str, title: &str, artist: &str, duration_ms: u32) -> 
     let data = found.as_ref().map_or_else(|| "{\"none\":true}".to_string(), |l| l.to_json());
     tokio::task::spawn_blocking(move || cache::write("lyrics", &name, data.as_bytes()));
     found
+}
+
+/// Album of each track looked up this session (track uri -> album uri). Bounded.
+static ALBUM_OF: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::LazyLock::new(Default::default);
+const ALBUM_OF_CAP: usize = 512;
+
+fn remember_album(track: &str, album: &str) {
+    let mut m = ALBUM_OF.lock().unwrap_or_else(|e| e.into_inner());
+    if m.len() >= ALBUM_OF_CAP {
+        m.clear();
+    }
+    m.insert(track.to_string(), album.to_string());
+}
+
+/// UI thread: the artist and album links of the playing track. Artists come with the track;
+/// the album is known (`album`), cached, or looked up once. Until then the title is plain text,
+/// so a click is never silently ignored. Local files and episodes get no links.
+fn set_links(ui: &MainWindow, seq: u64, uri: &str, artists: Vec<(String, String)>, album: Option<String>) {
+    let pb = ui.global::<Playback>();
+    let links: Vec<ArtistLink> = artists.into_iter().map(|(name, uri)| ArtistLink { name: name.into(), uri: uri.into() }).collect();
+    pb.set_artists(std::rc::Rc::new(slint::VecModel::from(links)).into());
+    pb.set_album_uri("".into());
+    if !uri.starts_with("spotify:track:") {
+        mini::sync(ui);
+        return;
+    }
+    let known = album.filter(|a| !a.is_empty()).or_else(|| ALBUM_OF.lock().unwrap_or_else(|e| e.into_inner()).get(uri).cloned());
+    if let Some(a) = known {
+        remember_album(uri, &a);
+        pb.set_album_uri(a.into());
+        mini::sync(ui);
+        return;
+    }
+    mini::sync(ui);
+    let (weak, uri) = (ui.as_weak(), uri.to_string());
+    runtime().spawn(async move {
+        let Some(album) = queue::player_meta(&uri).await.map(|m| m.album_uri).filter(|a| !a.is_empty()) else { return };
+        remember_album(&uri, &album);
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            if TRACK_GEN.load(Ordering::Relaxed) == seq {
+                ui.global::<Playback>().set_album_uri(album.into());
+                mini::sync(&ui);
+            }
+        });
+    });
 }
 
 /// Logical size of the small now-playing cover: the largest slot that shows it (mini player).
@@ -733,7 +779,7 @@ async fn stream(ui: &slint::Weak<MainWindow>, rt: tokio::runtime::Handle) -> Res
     while let Some(ev) = events.recv().await {
         eprintln!("player: {}", describe(&ev));
         match ev {
-            Event::Track { uri, title: t, artist: a, album, art_url: u, duration_ms, explicit } => {
+            Event::Track { uri, title: t, artist: a, album, art_url: u, duration_ms, explicit, artists } => {
                 current_uri = uri.clone();
                 // Local files show their tag title / artist (librespot only knows the file name).
                 let (t, a, album) = match (uri.starts_with("spotify:local:"), db::local_by_uri(&uri)) {
@@ -750,6 +796,7 @@ async fn stream(ui: &slint::Weak<MainWindow>, rt: tokio::runtime::Handle) -> Res
                 let rt = rt.clone();
                 let _ = ui.upgrade_in_event_loop(move |ui| {
                     apply_track(&ui, rt, seq, uri.clone(), t.clone(), a.clone(), album.clone(), u.clone(), duration_ms);
+                    set_links(&ui, seq, &uri, artists, None);
                     after_track(&ui, &uri, &t, &a, &album, duration_ms, explicit, u);
                 });
             }
@@ -898,7 +945,15 @@ fn demo(ui: &MainWindow, rt: &tokio::runtime::Runtime) {
     let (title, artist, album, uri, art) = (env("CADENCE_DEMO_TITLE"), env("CADENCE_DEMO_ARTIST"), env("CADENCE_DEMO_ALBUM"), env("CADENCE_DEMO_URI"), env("CADENCE_DEMO_ART"));
     let duration = num("CADENCE_DEMO_DURATION");
     let seq = TRACK_GEN.fetch_add(1, Ordering::Relaxed) + 1;
-    apply_track(ui, rt.handle().clone(), seq, uri, title, artist, album, (!art.is_empty()).then_some(art), duration);
+    apply_track(ui, rt.handle().clone(), seq, uri.clone(), title, artist, album, (!art.is_empty()).then_some(art), duration);
+    // CADENCE_DEMO_ARTISTS="Name|uri,Name|uri" and CADENCE_DEMO_ALBUM_URI: links in the bar.
+    let links: Vec<(String, String)> = env("CADENCE_DEMO_ARTISTS")
+        .split(',')
+        .filter_map(|s| s.split_once('|'))
+        .map(|(n, u)| (n.to_string(), u.to_string()))
+        .collect();
+    let album_uri = env("CADENCE_DEMO_ALBUM_URI");
+    set_links(ui, seq, &uri, links, (!album_uri.is_empty()).then_some(album_uri));
     let pb = ui.global::<Playback>();
     pb.set_playing(true);
     pb.set_expanded(env("CADENCE_EXPANDED") == "1");
@@ -1205,6 +1260,11 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     let weak = ui.as_weak();
+    pb.on_open_uri(|uri| {
+        if !uri.is_empty() {
+            browse::go(&uri);
+        }
+    });
     pb.on_open_artist(move || {
         if let Some(ui) = weak.upgrade() {
             let uri = ui.global::<Browse>().get_current_uri().to_string();

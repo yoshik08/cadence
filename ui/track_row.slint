@@ -132,12 +132,14 @@ export global SongColumns {
     }
 }
 
-// Three bars that step to new heights 8 times a second. Exists only on the current row while it
-// plays, so nothing ticks otherwise; no tween between steps, so each step is one frame.
+// Three bars that step to new heights 4 times a second. Exists only on the current row while it
+// plays, so nothing ticks otherwise; no tween between steps, so each step is one frame. Measured:
+// each frame redraws the window (about 8.6 ms of CPU), so 8 steps a second cost 6.9 % of a core
+// and 4 cost about half that.
 export component Equalizer inherits Rectangle {
     in property <color> tint: Tokens.accent;
     property <int> step;
-    property <duration> interval: 125ms;
+    property <duration> interval: 250ms;
     property <length> bar: 2px;
     width: Tokens.icon-xs;
     height: Tokens.icon-xs;

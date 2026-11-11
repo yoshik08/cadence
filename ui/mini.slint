@@ -2,8 +2,8 @@
 // windows have their own globals, so everything here is plain properties set by src/mini.rs.
 import { Tokens } from "tokens.slint";
 import { Cover } from "cover.slint";
-import { Icons, Scrubber } from "now_playing.slint";
-import { Label, Caption, Glyph, IconButton, Card as Surface } from "base.slint";
+import { Icons, Scrubber, ArtistLink, ArtistLinks } from "now_playing.slint";
+import { Label, Caption, Glyph, IconButton, Link, Card as Surface } from "base.slint";
 
 export component MiniWindow inherits Window {
     title: "Cadence mini player";
@@ -25,6 +25,8 @@ export component MiniWindow inherits Window {
 
     in property <string> track-title;
     in property <string> artist;
+    in property <string> album-uri;
+    in property <[ArtistLink]> artists;
     in property <image> art;
     in property <bool> art-fresh;
     in property <bool> playing;
@@ -40,6 +42,8 @@ export component MiniWindow inherits Window {
     callback close-mini();
     callback expand();
     callback drag();
+    // A link: show the main window and open the page there.
+    callback open-uri(string);
 
     Rectangle {
         border-radius: Tokens.radius-lg;
@@ -72,8 +76,20 @@ export component MiniWindow inherits Window {
         height: root.cover-size - Tokens.control-md;
         alignment: start;
         spacing: Tokens.space-2xs;
-        Label { text: root.track-title == "" ? "Nothing playing" : root.track-title; font-weight: Tokens.weight-semibold; }
-        Caption { text: root.artist; }
+        Link {
+            text: root.track-title == "" ? "Nothing playing" : root.track-title;
+            enabled: root.album-uri != "";
+            ink: Tokens.text-primary;
+            hover-ink: Tokens.text-bright;
+            font-size: Tokens.size-body;
+            font-weight: Tokens.weight-semibold;
+            clicked => { root.open-uri(root.album-uri); }
+        }
+        ArtistLinks {
+            artists: root.artists;
+            fallback: root.artist;
+            open(uri) => { root.open-uri(uri); }
+        }
     }
     Image {
         x: root.width - root.corner-buttons - Tokens.space-sm - Tokens.space-xl;
