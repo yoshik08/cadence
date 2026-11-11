@@ -124,10 +124,25 @@ pub struct ContextResolver {
     session: Session,
     queue: VecDeque<ResolveContext>,
     unavailable_contexts: HashMap<ResolveContext, Instant>,
+    /// Cadence patch: autoplay failures in a row, and when autoplay may be asked again.
+    autoplay_failures: u32,
+    autoplay_retry_at: Option<Instant>,
 }
 
 // time after which an unavailable context is retried
 const RETRY_UNAVAILABLE: Duration = Duration::from_secs(3600);
+
+/// Cadence patch: first autoplay retry delay, doubled per failure up to the cap.
+const AUTOPLAY_BACKOFF_BASE: Duration = Duration::from_secs(5);
+const AUTOPLAY_BACKOFF_MAX: Duration = Duration::from_secs(300);
+
+/// Cadence patch: wait after `failures` failed autoplay requests in a row (1 = first failure).
+pub(crate) fn autoplay_backoff(failures: u32) -> Duration {
+    let shift = failures.saturating_sub(1).min(16);
+    AUTOPLAY_BACKOFF_BASE
+        .saturating_mul(1 << shift)
+        .min(AUTOPLAY_BACKOFF_MAX)
+}
 
 impl ContextResolver {
     pub fn new(session: Session) -> Self {
@@ -135,25 +150,63 @@ impl ContextResolver {
             session,
             queue: VecDeque::new(),
             unavailable_contexts: HashMap::new(),
+            autoplay_failures: 0,
+            autoplay_retry_at: None,
         }
     }
 
-    pub fn add(&mut self, resolve: ResolveContext) {
-        let last_try = self
-            .unavailable_contexts
-            .get(&resolve)
-            .map(|i| i.duration_since(Instant::now()));
+    /// Cadence patch: the next resolve to run is an autoplay one.
+    pub fn next_is_autoplay(&self) -> bool {
+        matches!(self.find_next(), Some((next, _, _)) if next.update == ContextType::Autoplay)
+    }
 
-        let last_try = if matches!(last_try, Some(last_try) if last_try > RETRY_UNAVAILABLE) {
-            let _ = self.unavailable_contexts.remove(&resolve);
-            debug!(
-                "context was requested {}s ago, trying again to resolve the requested context",
-                last_try.expect("checked by condition").as_secs()
-            );
-            None
-        } else {
-            last_try
-        };
+    /// Cadence patch: backs autoplay off exponentially (capped) after a failure.
+    pub fn autoplay_failed(&mut self, why: &str) {
+        self.autoplay_failures = self.autoplay_failures.saturating_add(1);
+        let wait = autoplay_backoff(self.autoplay_failures);
+        self.autoplay_retry_at = Some(Instant::now() + wait);
+        crate::autoplay_log(&format!(
+            "autoplay: failed ({why}); attempt {}, next try in {}s at the earliest",
+            self.autoplay_failures,
+            wait.as_secs()
+        ));
+    }
+
+    pub fn autoplay_succeeded(&mut self) {
+        self.autoplay_failures = 0;
+        self.autoplay_retry_at = None;
+    }
+
+    pub fn add(&mut self, resolve: ResolveContext) {
+        // Cadence patch: autoplay retries follow the backoff instead of the unavailable list.
+        if resolve.update == ContextType::Autoplay {
+            if let Some(at) = self.autoplay_retry_at {
+                let now = Instant::now();
+                if now < at {
+                    crate::autoplay_log(&format!(
+                        "autoplay: skipped, backing off for {}s more",
+                        (at - now).as_secs()
+                    ));
+                    return;
+                }
+            }
+            if self.queue.contains(&resolve) {
+                return;
+            }
+            crate::autoplay_log(&format!(
+                "autoplay: requested for seed {} ({:?})",
+                resolve.resolve_uri().unwrap_or("?"),
+                resolve.action
+            ));
+            self.queue.push_back(resolve);
+            return;
+        }
+
+        // Cadence patch: 0.8.0 measured `duration_since(now)` (always 0), so an unavailable
+        // context was never retried and the map never shrank.
+        self.unavailable_contexts
+            .retain(|_, at| at.elapsed() < RETRY_UNAVAILABLE);
+        let last_try = self.unavailable_contexts.get(&resolve).map(|i| i.elapsed());
 
         if last_try.is_some() {
             debug!("tried loading unavailable context: {resolve}");
@@ -184,8 +237,11 @@ impl ContextResolver {
         self.queue.pop_front(); // remove used
     }
 
+    /// Drops pending resolves (a new load). Cadence patch: the new context gets a fresh
+    /// autoplay try.
     pub fn clear(&mut self) {
-        self.queue = VecDeque::new()
+        self.queue = VecDeque::new();
+        self.autoplay_succeeded();
     }
 
     fn find_next(&self) -> Option<(&ResolveContext, &str, usize)> {
@@ -243,6 +299,10 @@ impl ContextResolver {
 
     pub fn mark_next_unavailable(&mut self) {
         if let Some((next, _, _)) = self.find_next() {
+            // Cadence patch: autoplay uses the backoff (handle_next_context calls autoplay_failed)
+            if next.update == ContextType::Autoplay {
+                return;
+            }
             self.unavailable_contexts
                 .insert(next.clone(), Instant::now());
         }
@@ -256,8 +316,21 @@ impl ContextResolver {
         let (next, _, _) = self.find_next().ok_or(ContextResolverError::NoNext)?;
 
         let remaining = match next.action {
+            // Cadence patch: autoplay refills go to the autoplay context, all pages in one.
+            ContextAction::Append if next.update == ContextType::Autoplay => {
+                let page = std::mem::take(&mut context.pages)
+                    .into_iter()
+                    .reduce(|mut a, b| {
+                        a.tracks.extend(b.tracks);
+                        a
+                    })
+                    .unwrap_or_default();
+                state
+                    .fill_context_from_page(page, ContextType::Autoplay)
+                    .map(|_| None)
+            }
             ContextAction::Append if context.pages.len() == 1 => state
-                .fill_context_from_page(context.pages.remove(0))
+                .fill_context_from_page(context.pages.remove(0), next.update)
                 .map(|_| None),
             ContextAction::Replace => {
                 let remaining = state.update_context(context, next.update);
@@ -342,5 +415,20 @@ impl ContextResolver {
         state.update_queue_revision();
 
         true
+    }
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::*;
+
+    #[test]
+    fn autoplay_backoff_doubles_and_caps() {
+        assert_eq!(autoplay_backoff(1), Duration::from_secs(5));
+        assert_eq!(autoplay_backoff(2), Duration::from_secs(10));
+        assert_eq!(autoplay_backoff(3), Duration::from_secs(20));
+        assert_eq!(autoplay_backoff(7), Duration::from_secs(300));
+        assert_eq!(autoplay_backoff(u32::MAX), Duration::from_secs(300));
+        assert_eq!(autoplay_backoff(0), Duration::from_secs(5));
     }
 }

@@ -76,6 +76,8 @@ impl Player {
         cache: Cache,
     ) -> Result<(Player, Receiver<Event>), String> {
         let initial_volume = cache.volume().unwrap_or(u16::MAX / 2);
+        // Autoplay request / result / failure lines from the vendored Spirc go to cadence.log.
+        librespot_connect::set_autoplay_log(crate::log::line);
 
         // Default client id on Windows is the keymaster id, which matches the librespot-oauth token.
         // Settings read once at startup (Settings marks them "applies after a restart").

@@ -190,6 +190,28 @@ impl ConnectState {
         mut context: Context,
         ty: ContextType,
     ) -> Result<Option<Vec<String>>, Error> {
+        if ty == ContextType::Autoplay {
+            // Cadence patch: one page of only new, playable tracks. Further page urls are
+            // dropped: the next refill asks the autoplay endpoint again with a fresh seed.
+            let mut page = ContextPage::new();
+            let pages = std::mem::take(&mut context.pages);
+            for p in pages {
+                if page.metadata.is_empty() {
+                    page.metadata = p.metadata;
+                }
+                page.tracks.extend(p.tracks);
+            }
+            let left = self.cadence_filter_autoplay(&mut page.tracks);
+            crate::autoplay_log(&format!(
+                "autoplay: resolved context {} ({left} new tracks)",
+                context.uri.as_deref().unwrap_or("?")
+            ));
+            if left == 0 {
+                Err(StateError::ContextHasNoTracks)?
+            }
+            context.pages.push(page);
+        }
+
         if context.pages.iter().all(|p| p.tracks.is_empty()) {
             error!("context didn't have any tracks: {context:#?}");
             Err(StateError::ContextHasNoTracks)?;
@@ -281,7 +303,7 @@ impl ConnectState {
             .into_iter()
             .flat_map(|page| {
                 if !page.tracks.is_empty() {
-                    self.fill_context_from_page(page).ok()?;
+                    self.fill_context_from_page(page, ty).ok()?;
                     None
                 } else if matches!(page.page_url, Some(ref url) if !url.is_empty()) {
                     Some(page_url_to_uri(
@@ -502,7 +524,25 @@ impl ConnectState {
         Ok(track)
     }
 
-    pub fn fill_context_from_page(&mut self, page: ContextPage) -> Result<(), Error> {
+    /// Cadence patch: `ty` Autoplay appends to the autoplay context (0.8.0 appended every page
+    /// to the default context, so autoplay refills were never played).
+    pub fn fill_context_from_page(&mut self, mut page: ContextPage, ty: ContextType) -> Result<(), Error> {
+        if ty == ContextType::Autoplay {
+            let left = self.cadence_filter_autoplay(&mut page.tracks);
+            crate::autoplay_log(&format!("autoplay: resolved refill ({left} new tracks)"));
+            if left == 0 {
+                Err(StateError::ContextHasNoTracks)?
+            }
+            self.cadence_trim_autoplay();
+            let context = self.state_context_from_page(page, HashMap::new(), None, None, None, Some(Provider::Autoplay));
+            let ctx = self
+                .autoplay_context
+                .as_mut()
+                .ok_or(StateError::NoContext(ContextType::Autoplay))?;
+            ctx.tracks.extend(context.tracks);
+            return Ok(());
+        }
+
         let ctx_len = self.context.as_ref().map(|c| c.tracks.len());
         let context = self.state_context_from_page(page, HashMap::new(), None, None, ctx_len, None);
 

@@ -111,6 +111,7 @@ impl<'ct> ConnectState {
         let old_track = self.player_mut().track.take();
 
         if let Some(old_track) = old_track {
+            self.cadence_mark_played(&old_track.uri);
             // only add songs from our context to our previous tracks
             if old_track.is_context() || old_track.is_autoplay() {
                 self.push_prev(old_track)
@@ -445,6 +446,7 @@ impl<'ct> ConnectState {
             uri: t.uri.clone(),
             uid: t.uid.clone(),
             queued: t.is_queue(),
+            autoplay: t.is_autoplay(),
         };
         let real = |t: &&ProvidedTrack| !t.uid.starts_with(IDENTIFIER_DELIMITER) && !t.uri.is_empty();
         crate::QueueSnapshot {
@@ -488,5 +490,113 @@ impl<'ct> ConnectState {
         self.next_tracks_mut().retain(|t| !t.is_queue());
         self.update_queue_revision();
         self.update_restrictions();
+    }
+
+    /// Cadence patch: remembers a played uri in the bounded ring buffer.
+    pub fn cadence_mark_played(&mut self, uri: &str) {
+        if uri.is_empty() || !uri.starts_with("spotify:") {
+            return;
+        }
+        cadence_push_ring(&mut self.cadence_played, uri, super::CADENCE_PLAYED_MAX);
+    }
+
+    /// Cadence patch: the uri to ask autoplay for. The context itself, except for track lists
+    /// (`spotify:web-api`), which the autoplay endpoint can't resolve: then the playing track,
+    /// or the latest played one when that is a local file. `None`: nothing to seed from.
+    pub fn cadence_autoplay_seed(&self) -> Option<String> {
+        let ctx = self.context_uri();
+        if ctx.is_empty() {
+            return None;
+        }
+        if ctx != CADENCE_TRACK_LIST_URI {
+            return Some(ctx.clone());
+        }
+        let current = self.current_track(|t| t.uri.clone());
+        std::iter::once(current)
+            .chain(self.prev_tracks().iter().rev().map(|t| t.uri.clone()))
+            .chain(self.cadence_played.iter().rev().cloned())
+            .find(|u| cadence_seedable(u))
+    }
+
+    /// Cadence patch: drops autoplay tracks played this session, in the context that just
+    /// ended, already waiting in the autoplay context, marked unavailable, or listed twice.
+    /// Returns how many are left.
+    pub fn cadence_filter_autoplay(&self, tracks: &mut Vec<crate::protocol::context_track::ContextTrack>) -> usize {
+        use std::collections::HashSet;
+        let mut seen: HashSet<&str> = self.cadence_played.iter().map(String::as_str).collect();
+        seen.extend(self.unavailable_uri.iter().map(String::as_str));
+        seen.insert(self.current_track(|t| t.uri.as_str()));
+        if let Some(ctx) = self.context.as_ref() {
+            seen.extend(ctx.tracks.iter().map(|t| t.uri.as_str()));
+        }
+        if let Some(ctx) = self.autoplay_context.as_ref() {
+            seen.extend(ctx.tracks.iter().skip(ctx.index.track as usize).map(|t| t.uri.as_str()));
+        }
+        let mut kept: HashSet<String> = HashSet::new();
+        tracks.retain(|t| match t.uri.as_deref() {
+            // gid-only items can't be compared here; librespot converts them later
+            None | Some("") => true,
+            Some(uri) => !seen.contains(uri) && kept.insert(uri.to_string()),
+        });
+        tracks.len()
+    }
+
+    /// Cadence patch: frees autoplay tracks that were already moved to next_tracks, keeping one
+    /// so the context's index stays non-zero (librespot reads index 0 as "untouched").
+    pub fn cadence_trim_autoplay(&mut self) {
+        if let Some(ctx) = self.autoplay_context.as_mut() {
+            let idx = (ctx.index.track as usize).min(ctx.tracks.len());
+            if idx > 1 {
+                ctx.tracks.drain(0..idx - 1);
+                ctx.index.track = 1;
+            }
+        }
+    }
+}
+
+/// Cadence patch: the context uri librespot gives track-list loads.
+pub(crate) const CADENCE_TRACK_LIST_URI: &str = "spotify:web-api";
+
+/// Cadence patch: a track the autoplay endpoint accepts as a seed (no local files, no episodes).
+pub(crate) fn cadence_seedable(uri: &str) -> bool {
+    uri.starts_with("spotify:track:")
+}
+
+/// Cadence patch: appends `uri` (moving it to the end if present), keeping at most `max`.
+pub(crate) fn cadence_push_ring(ring: &mut std::collections::VecDeque<String>, uri: &str, max: usize) {
+    if let Some(i) = ring.iter().position(|u| u == uri) {
+        ring.remove(i);
+    }
+    ring.push_back(uri.to_string());
+    while ring.len() > max {
+        ring.pop_front();
+    }
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn ring_is_bounded_and_moves_repeats_to_the_end() {
+        let mut ring = VecDeque::new();
+        for i in 0..500 {
+            cadence_push_ring(&mut ring, &format!("spotify:track:{i}"), 200);
+        }
+        assert_eq!(ring.len(), 200);
+        assert_eq!(ring.front().map(String::as_str), Some("spotify:track:300"));
+        cadence_push_ring(&mut ring, "spotify:track:300", 200);
+        assert_eq!(ring.len(), 200);
+        assert_eq!(ring.back().map(String::as_str), Some("spotify:track:300"));
+        assert_eq!(ring.front().map(String::as_str), Some("spotify:track:301"));
+    }
+
+    #[test]
+    fn only_spotify_tracks_seed_autoplay() {
+        assert!(cadence_seedable("spotify:track:4uLU6hMCjMI75M1A2tKUQC"));
+        assert!(!cadence_seedable("spotify:local:a:b:c:180"));
+        assert!(!cadence_seedable("spotify:episode:xyz"));
+        assert!(!cadence_seedable(""));
     }
 }

@@ -613,8 +613,12 @@ impl SpircTask {
     }
 
     fn handle_next_context(&mut self, next_context: Result<Context, Error>) -> bool {
+        let autoplay = self.context_resolver.next_is_autoplay();
         let next_context = match next_context {
             Err(why) => {
+                if autoplay {
+                    self.context_resolver.autoplay_failed(&why.to_string());
+                }
                 self.context_resolver.mark_next_unavailable();
                 self.context_resolver.remove_used_and_invalid();
                 error!("{why}");
@@ -630,11 +634,19 @@ impl SpircTask {
             .apply_next_context(&mut self.connect_state, next_context)
         {
             Ok(remaining) => {
+                if autoplay {
+                    self.context_resolver.autoplay_succeeded();
+                }
                 if let Some(remaining) = remaining {
                     self.context_resolver.add_list(remaining)
                 }
             }
             Err(why) => {
+                // Cadence patch: an autoplay batch with nothing new also backs off, so an
+                // unhelpful answer can't turn into a request loop.
+                if autoplay {
+                    self.context_resolver.autoplay_failed(&why.to_string());
+                }
                 error!("{why}")
             }
         }
@@ -1329,7 +1341,12 @@ impl SpircTask {
                 self.load_context_from_uri(uri, page.as_ref(), autoplay)
                     .await?
             }
-            PlayContext::Tracks(tracks) => self.load_context_from_tracks(tracks)?,
+            PlayContext::Tracks(tracks) => {
+                // Cadence patch: drop pending resolves (an autoplay request for the previous
+                // context) so they can't land in this one.
+                self.context_resolver.clear();
+                self.load_context_from_tracks(tracks)?
+            }
         }
 
         let cmd_options = cmd.options;
@@ -1577,13 +1594,21 @@ impl SpircTask {
     fn handle_repeat_context(&mut self, repeat: bool) -> Result<(), Error> {
         self.player
             .emit_repeat_changed_event(repeat, self.connect_state.repeat_track());
-        self.connect_state.handle_set_repeat_context(repeat)
+        self.connect_state.handle_set_repeat_context(repeat)?;
+        // Cadence patch: repeat turned off near the end: autoplay may be needed now
+        if !repeat {
+            self.add_autoplay_resolving_when_required();
+        }
+        Ok(())
     }
 
     fn handle_repeat_track(&mut self, repeat: bool) {
         self.player
             .emit_repeat_changed_event(self.connect_state.repeat_context(), repeat);
         self.connect_state.set_repeat_track(repeat);
+        if !repeat {
+            self.add_autoplay_resolving_when_required();
+        }
     }
 
     fn handle_preload_next_track(&mut self) {
@@ -1601,6 +1626,10 @@ impl SpircTask {
             }
             _ => (),
         }
+
+        // Cadence patch: one more autoplay try before the end, in case the request at the
+        // start of this track failed (it is skipped while backing off).
+        self.add_autoplay_resolving_when_required();
 
         if let Some(track_id) = self.connect_state.preview_next_track() {
             self.player.preload(track_id);
@@ -1620,13 +1649,21 @@ impl SpircTask {
             .connect_state
             .has_next_tracks(Some(CONTEXT_FETCH_THRESHOLD))
             && self.session.autoplay()
+            // Cadence patch: with repeat on, the end is never reached
+            && !self.connect_state.repeat_context()
+            && !self.connect_state.repeat_track()
             && !self.connect_state.context_uri().is_empty();
 
         if !require_load_new {
             return;
         }
 
-        let current_context = self.connect_state.context_uri();
+        // Cadence patch: track lists (`spotify:web-api`) seed from the playing / last played
+        // track; nothing to seed from (local files only) means no autoplay.
+        let Some(current_context) = self.connect_state.cadence_autoplay_seed() else {
+            crate::autoplay_log("autoplay: skipped, no Spotify track to seed from");
+            return;
+        };
         let fallback = self.connect_state.current_track(|t| &t.uri);
 
         let has_tracks = self

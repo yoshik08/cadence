@@ -131,7 +131,14 @@ pub(super) struct ConnectState {
 
     /// The volume adjustment per step when handling individual volume adjustments.
     pub volume_step_size: u16,
+
+    /// Cadence patch: uris played this session (newest last), at most
+    /// [CADENCE_PLAYED_MAX], so autoplay doesn't bring them back.
+    cadence_played: std::collections::VecDeque<String>,
 }
+
+/// Cadence patch: size of the played-uris ring buffer.
+pub(super) const CADENCE_PLAYED_MAX: usize = 200;
 
 impl ConnectState {
     pub fn new(cfg: ConnectConfig, session: &Session) -> Self {
