@@ -185,6 +185,12 @@ impl Player {
         self.load(context_uri, PlayingTrack::Index(index as u32), 0, true);
     }
 
+    /// Starts `context_uri` (album, playlist, artist, Liked Songs) at the track `track_uri`, so
+    /// playback carries on through the same context.
+    pub fn play_from(&self, context_uri: &str, track_uri: &str) {
+        self.load(context_uri, PlayingTrack::Uri(track_uri.to_string()), 0, true);
+    }
+
     /// Starts `context_uri` with shuffle on from a random one of its `count` tracks.
     pub fn play_shuffled(&self, context_uri: &str, count: usize) {
         self.set_shuffle(true);

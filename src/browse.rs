@@ -693,6 +693,12 @@ fn new_page(ui: &MainWindow, page: &str, status: &str) -> u64 {
 /// Navigates to a route: "home", "search", "library", "stats", "profile", "settings",
 /// "showall:<kind>:<query>", "local", "folder:<id>", "artist-liked:<uri>", or a Spotify uri.
 pub fn go(route: &str) {
+    if let Some(track) = route.strip_prefix("recent:") {
+        if let Some(album) = recent_play(track).map(|p| p.album).filter(|a| !a.is_empty()) {
+            go(&album);
+        }
+        return;
+    }
     let Some(ui) = ui() else { return };
     let scroll = ui.global::<Browse>().get_scroll_y();
     NAV.with(|n| {
@@ -972,6 +978,7 @@ struct HomeData {
     name: String,
     filled: HashMap<String, (Vec<CardData>, String, String)>,
     error: Option<String>,
+    recent: Vec<RecentPlay>,
 }
 
 /// Home, cache first: the shelves are built from what is on disk (API cache + library index)
@@ -1006,6 +1013,9 @@ fn apply_home(w: &Weak<MainWindow>, h: HomeData, g: u64, done: bool) {
         crate::logln!("launch: home {} at +{} ms ({cards} cards)", if done { "refreshed" } else { "shown from cache" }, crate::since_start_ms());
         b.set_skeleton(false);
         b.set_greeting(greeting(&h.name).into());
+        if h.filled.contains_key("recent") {
+            RECENT.with(|r| *r.borrow_mut() = h.recent.clone());
+        }
         // Background tint from the first recently played cover.
         if let Some(first) = h.filled.get("recent").and_then(|f| f.0.first()) {
             art_into(&first.images, &first.art_url, 64.0, g, |ui, _, (r, gr, bl), _| {
@@ -1029,31 +1039,12 @@ async fn home_data(src: Source) -> HomeData {
     // Cards from the library index use the larger cover URL (the shelves are 140 / 160 px).
     let lib_px = art::physical(160.0, scale_factor());
 
+    let mut recent = Vec::new();
     if want("recent") {
         match api::get_from(src, "me/player/recently-played", &[("limit", "50")]).await {
             Ok(j) => {
-                let mut seen = HashSet::new();
-                let mut cards = Vec::new();
-                for it in arr(&j["items"]) {
-                    // The context (playlist / album) if any, else the album.
-                    let ctx = s(&it["context"]["uri"]);
-                    let album = &it["track"]["album"];
-                    let key = if ctx.starts_with("spotify:album:") || ctx.is_empty() { s(&album["uri"]).to_string() } else { ctx.to_string() };
-                    if !seen.insert(key.clone()) {
-                        continue;
-                    }
-                    if key.starts_with("spotify:album:") {
-                        cards.extend(api::album_card(album));
-                    } else if let Some(t) = known_title(&key).or_else(|| db::library_get(&key).map(|l| l.title)) {
-                        let img = db::library_get(&key).map(|l| l.art_url(lib_px).to_string()).unwrap_or_default();
-                        cards.push(CardData { title: t, subtitle: "Playlist".into(), uri: key, art_url: img, kind: "playlist".into(), ..Default::default() });
-                    } else {
-                        cards.extend(api::album_card(album));
-                    }
-                    if cards.len() >= 20 {
-                        break;
-                    }
-                }
+                let (cards, plays) = recent_cards(&j);
+                recent = plays;
                 filled.insert("recent".into(), (cards, String::new(), String::new()));
             }
             Err(e) if src == Source::Network => error = Some(e.to_string()),
@@ -1095,7 +1086,73 @@ async fn home_data(src: Source) -> HomeData {
     if want("mostplayed") {
         filled.insert("mostplayed".into(), most_played_cards().await);
     }
-    HomeData { name, filled, error }
+    HomeData { name, filled, error, recent }
+}
+
+/// One Recently played card: the track listened to, where it was played from, and its album.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct RecentPlay {
+    track: String,
+    /// Context uri as Spotify reports it (album, playlist, artist, Liked Songs); empty if none.
+    context: String,
+    album: String,
+}
+
+/// Cards per track from the play history (newest first, one card per track uri), and what each
+/// card plays. Card uris are `recent:<track uri>`: the card body opens the album, Play starts
+/// that track in its context.
+fn recent_cards(j: &Value) -> (Vec<CardData>, Vec<RecentPlay>) {
+    let mut seen = HashSet::new();
+    let (mut cards, mut plays) = (Vec::new(), Vec::new());
+    for it in arr(&j["items"]) {
+        let t = &it["track"];
+        let uri = s(&t["uri"]);
+        if uri.is_empty() || !seen.insert(uri.to_string()) {
+            continue;
+        }
+        cards.push(CardData {
+            title: s(&t["name"]).to_string(),
+            subtitle: api::names(&t["artists"]),
+            uri: format!("recent:{uri}"),
+            images: api::sizes(api::images(&t["album"]["images"])),
+            kind: "recent".into(),
+            ..Default::default()
+        });
+        plays.push(RecentPlay { track: uri.to_string(), context: s(&it["context"]["uri"]).to_string(), album: s(&t["album"]["uri"]).to_string() });
+        if cards.len() >= RECENT_CARDS {
+            break;
+        }
+    }
+    (cards, plays)
+}
+
+/// Cards in the Recently played shelf.
+const RECENT_CARDS: usize = 20;
+
+thread_local! {
+    /// What the Recently played cards on screen play (UI thread; replaced with the shelf).
+    static RECENT: RefCell<Vec<RecentPlay>> = const { RefCell::new(Vec::new()) };
+}
+
+fn recent_play(track: &str) -> Option<RecentPlay> {
+    RECENT.with(|r| r.borrow().iter().find(|p| p.track == track).cloned())
+}
+
+/// Play on a Recently played card: that exact track, carrying on through the album, playlist,
+/// artist or Liked Songs it was played from; on its own when there was no context.
+fn play_recent(ui: &MainWindow, track: &str) {
+    crate::queue::forget_restore();
+    let context = recent_play(track).map(|p| p.context).unwrap_or_default();
+    let pb = ui.global::<Playback>();
+    if context.is_empty() {
+        pb.set_context_uri("".into());
+        crate::with_player(|p| p.play(track, 0));
+    } else {
+        // Liked Songs comes as spotify:user:<id>:collection, which is the context the Liked
+        // Songs page plays too; albums, playlists and artists are their own uris.
+        pb.set_context_uri(context.as_str().into());
+        crate::with_player(|p| p.play_from(&context, track));
+    }
 }
 
 /// Home without Spotify sign-in: only Cadence's own data.
@@ -2585,6 +2642,9 @@ fn shuffle_vec<T>(v: &mut [T]) {
 }
 
 fn play_card(ui: &MainWindow, uri: &str) {
+    if let Some(track) = uri.strip_prefix("recent:") {
+        return play_recent(ui, track);
+    }
     crate::queue::forget_restore();
     let uri = if uri == "liked" {
         my_id().map(|id| format!("spotify:user:{id}:collection")).unwrap_or_default()
@@ -3000,7 +3060,8 @@ pub fn init(ui: &MainWindow) {
             play_card(&ui, &uri);
         }
     });
-    b.on_card_menu(|uri, x, y| crate::menu::open_for_card(&uri, x, y));
+    // A Recently played card is its track as far as the menu is concerned.
+    b.on_card_menu(|uri, x, y| crate::menu::open_for_card(uri.strip_prefix("recent:").unwrap_or(&uri), x, y));
     b.on_list_menu(|x, y| crate::menu::open_list_menu(x, y));
     let w = ui.as_weak();
     b.on_toggle_save(move || {
@@ -3213,6 +3274,27 @@ pub fn reapply_filters() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recently_played_is_one_card_per_track_newest_first() {
+        let item = |track: &str, name: &str, ctx: &str, album: &str| {
+            json!({
+                "track": { "uri": track, "name": name, "artists": [{ "name": "A" }], "album": { "uri": album, "images": [] } },
+                "context": if ctx.is_empty() { Value::Null } else { json!({ "uri": ctx, "type": "playlist" }) },
+            })
+        };
+        let j = json!({ "items": [
+            item("spotify:track:new", "New", "spotify:playlist:p", "spotify:album:a1"),
+            item("spotify:track:old", "Old", "", "spotify:album:a2"),
+            item("spotify:track:new", "New", "spotify:album:a1", "spotify:album:a1"),
+        ]});
+        let (cards, plays) = recent_cards(&j);
+        assert_eq!(cards.iter().map(|c| c.uri.as_str()).collect::<Vec<_>>(), ["recent:spotify:track:new", "recent:spotify:track:old"]);
+        assert_eq!(cards[0].title, "New");
+        // The newest play of a track decides its context; no context stays empty (single track).
+        assert_eq!(plays[0], RecentPlay { track: "spotify:track:new".into(), context: "spotify:playlist:p".into(), album: "spotify:album:a1".into() });
+        assert_eq!(plays[1].context, "");
+    }
 
     #[test]
     fn row_button_toggles_only_the_current_track() {
