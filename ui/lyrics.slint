@@ -7,148 +7,98 @@
 // its rows already wrapped for the current window and with its exact height and offset, so the
 // scroll target is known without measuring anything here. Rust also drives `lyric-ms`, the
 // active line and the karaoke word slots.
-import { Playback, LyrLine, KWord, KMotion, Icons } from "now_playing.slint";
+//
+// Colours, type and motion come from Tokens. The page's own geometry is ported from the site and
+// measured against by Rust, so it stays here as named properties rather than on the shared scale.
+import { Tokens } from "tokens.slint";
+import { Crossfade } from "cover.slint";
+import { Glyph, IconButton } from "base.slint";
+import { Playback, PlayButton, LyrLine, KWord, KMotion, Icons } from "now_playing.slint";
 
 // Geometry shared with Rust (lyrics_view::Geometry). Change both together.
 export global LyrGeo {
+    out property <length> side-max: 540px;
+    out property <length> size-min: 22px;
+    out property <length> size-max: 34px;
+    out property <length> active-min: 30px;
+    out property <length> active-max: 48px;
+    // Padding above and below every line (included in the heights Rust sends).
+    out property <length> line-pad: 16px;
+    out property <float> line-height: 1.35;
+    out property <float> tracking: -0.015;
     public pure function pad-x(w: length) -> length { return w * 0.06; }
-    public pure function side-w(w: length) -> length { return min(w * 0.38, 540px); }
-    public pure function size(w: length) -> length { return clamp(w * 0.029, 22px, 34px); }
-    public pure function active-size(w: length) -> length { return clamp(w * 0.04, 30px, 48px); }
+    public pure function side-w(w: length) -> length { return min(w * 0.38, LyrGeo.side-max); }
+    public pure function size(w: length) -> length { return clamp(w * 0.029, LyrGeo.size-min, LyrGeo.size-max); }
+    public pure function active-size(w: length) -> length { return clamp(w * 0.04, LyrGeo.active-min, LyrGeo.active-max); }
 }
 
-component Glyph inherits Path {
-    in property <length> size: 14px;
-    in property <color> tint: #ffffff;
-    in property <float> stroke-w: 2;
-    width: root.size;
-    height: root.size;
-    viewbox-width: 24;
-    viewbox-height: 24;
-    fill: transparent;
-    stroke: root.tint;
-    stroke-width: root.stroke-w * root.size / 24px * 1px;
-    stroke-line-cap: round;
-    stroke-line-join: round;
+// Sizes shared by the page's controls.
+global LyrChrome {
+    // .karaoke-toggle and the close button: 38px glass pills.
+    out property <length> pill: 38px;
+    out property <length> pill-pad: Tokens.space-lg;
+    out property <length> pill-icon: 14px;
+    // The white play / pause disc and the row it sits in.
+    out property <length> disc: 56px;
+    out property <length> transport-gap: 14px;
+    // Distance of the floating chrome from the window edge.
+    out property <length> edge: 22px;
 }
 
-// .karaoke-toggle: a 38px pill. `active` is the white state.
+// .karaoke-toggle: a glass pill. `active` is the white state.
 component Pill inherits Rectangle {
     in property <string> label;
     in property <string> icon;
     in property <bool> active;
+    in property <bool> enabled: true;
     callback clicked;
-    height: 38px;
-    width: row.preferred-width;
-    border-radius: 19px;
-    border-width: 1px;
-    border-color: root.active ? #ffffff : #ffffff24;
-    background: root.active ? #ffffff : ta.has-hover ? #ffffff2e : #ffffff14;
-    animate background, border-color { duration: 200ms; easing: ease; }
+    height: LyrChrome.pill;
+    width: root.label == "" ? LyrChrome.pill : row.preferred-width;
+    border-radius: Tokens.radius-full;
+    border-width: Tokens.hairline;
+    opacity: root.enabled ? 1 : Tokens.disabled-opacity;
+    border-color: root.active ? Tokens.text-bright : Tokens.border-strong;
+    background: root.active ? Tokens.text-bright
+        : ta.pressed ? Tokens.bg-pressed
+        : ta.has-hover ? Tokens.bg-glass-hover
+        : Tokens.bg-glass;
+    animate background, border-color { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
     row := HorizontalLayout {
-        padding-left: 16px;
-        padding-right: 16px;
-        spacing: 6px;
+        padding-left: root.label == "" ? 0px : LyrChrome.pill-pad;
+        padding-right: root.label == "" ? 0px : LyrChrome.pill-pad;
+        spacing: Tokens.space-xs;
         alignment: center;
         Glyph {
             y: (parent.height - self.height) / 2;
+            size: LyrChrome.pill-icon;
             commands: root.icon;
-            tint: root.active ? #000000 : #ffffff;
+            tint: root.active ? Tokens.black : Tokens.text-bright;
         }
-        Text {
+        if root.label != "" : Text {
             text: root.label;
             vertical-alignment: center;
-            font-family: "Bricolage Grotesque";
-            font-size: 13px;
-            font-weight: 500;
-            color: root.active ? #000000 : #ffffff;
+            font-family: Tokens.font-lyrics-ui;
+            font-size: Tokens.size-caption;
+            font-weight: Tokens.weight-medium;
+            color: root.active ? Tokens.black : Tokens.text-bright;
         }
     }
     ta := TouchArea {
+        enabled: root.enabled;
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
-    }
-}
-
-// A round icon button for the lyrics page transport.
-component TransportButton inherits Rectangle {
-    in property <string> icon;
-    in property <bool> solid;
-    in property <bool> active;
-    in property <length> icon-size: 20px;
-    callback clicked;
-    property <color> tint: root.active || ta.has-hover || root.solid ? #ffffff : #ffffff8c;
-    width: 40px;
-    height: 40px;
-    border-radius: self.width / 2;
-    background: ta.pressed ? #ffffff2e : ta.has-hover ? #ffffff17 : transparent;
-    animate background { duration: 150ms; easing: ease; }
-    animate tint { duration: 150ms; easing: ease; }
-    Path {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: root.icon-size;
-        height: root.icon-size;
-        viewbox-width: 24;
-        viewbox-height: 24;
-        commands: root.icon;
-        fill: root.solid ? root.tint : transparent;
-        stroke: root.tint;
-        stroke-width: (root.solid ? 0.6 : 2) * root.icon-size / 24px * 1px;
-        stroke-line-cap: round;
-        stroke-line-join: round;
-    }
-    if root.active : Rectangle {
-        x: (parent.width - 4px) / 2;
-        y: parent.height - 5px;
-        width: 4px;
-        height: 4px;
-        border-radius: 2px;
-        background: #ffffff;
-    }
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
-// The white play / pause disc.
-component PlayDisc inherits Rectangle {
-    in property <length> size: 56px;
-    width: root.size;
-    height: root.size;
-    border-radius: root.size / 2;
-    background: ta.pressed ? #ffffffbf : #ffffff;
-    animate background { duration: 120ms; easing: ease; }
-    Path {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: root.size * 0.46;
-        height: root.size * 0.46;
-        viewbox-width: 24;
-        viewbox-height: 24;
-        commands: Playback.playing ? Icons.pause : Icons.play;
-        fill: #08080a;
-        stroke: #08080a;
-        stroke-width: 0.6 * root.size * 0.46 / 24px * 1px;
-        stroke-line-join: round;
-    }
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { Playback.play-pause(); }
     }
 }
 
 // shuffle · prev · play · next · repeat
 component Transport inherits HorizontalLayout {
-    in property <length> disc: 56px;
-    spacing: 14px;
+    spacing: LyrChrome.transport-gap;
     alignment: center;
-    TransportButton { y: (parent.height - self.height) / 2; icon: Icons.shuffle; active: Playback.shuffle; icon-size: 18px; clicked => { Playback.toggle-shuffle(); } }
-    TransportButton { y: (parent.height - self.height) / 2; icon: Icons.prev; solid: true; icon-size: 22px; clicked => { Playback.prev(); } }
-    PlayDisc { y: (parent.height - self.height) / 2; size: root.disc; }
-    TransportButton { y: (parent.height - self.height) / 2; icon: Icons.next; solid: true; icon-size: 22px; clicked => { Playback.next(); } }
-    TransportButton { y: (parent.height - self.height) / 2; icon: Icons.repeat; active: Playback.repeat > 0; icon-size: 18px; clicked => { Playback.toggle-repeat(); } }
+    IconButton { y: (parent.height - self.height) / 2; round: true; size: Tokens.control-lg; icon: Icons.shuffle; active: Playback.shuffle; active-color: Tokens.text-bright; clicked => { Playback.toggle-shuffle(); } }
+    IconButton { y: (parent.height - self.height) / 2; round: true; size: Tokens.control-lg; icon: Icons.prev; solid: true; tint: Tokens.text-bright; icon-size: Tokens.icon-lg; clicked => { Playback.prev(); } }
+    PlayButton { y: (parent.height - self.height) / 2; diameter: LyrChrome.disc; clicked => { Playback.play-pause(); } }
+    IconButton { y: (parent.height - self.height) / 2; round: true; size: Tokens.control-lg; icon: Icons.next; solid: true; tint: Tokens.text-bright; icon-size: Tokens.icon-lg; clicked => { Playback.next(); } }
+    IconButton { y: (parent.height - self.height) / 2; round: true; size: Tokens.control-lg; icon: Icons.repeat; active: Playback.repeat > 0; active-color: Tokens.text-bright; clicked => { Playback.toggle-repeat(); } }
 }
 
 global Clock {
@@ -159,30 +109,10 @@ global Clock {
     }
 }
 
-component CloseButton inherits Rectangle {
-    callback clicked;
-    width: 38px;
-    height: 38px;
-    border-radius: 19px;
-    border-width: 1px;
-    border-color: #ffffff24;
-    background: ta.has-hover ? #ffffff2e : #ffffff14;
-    animate background { duration: 150ms; }
-    Glyph {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        size: 14px;
-        commands: "M6 6L18 18M18 6L6 18";
-    }
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
 // One lyric line (.lyr-line). Rows come pre-wrapped from Rust; the active line uses the larger
-// rows (`arows`), or per-letter rows (`wrows`) when it has word timings. Past lines .45 white,
-// upcoming .32, active white; unlit letters of the active line .35 and light as `lyric-ms` passes.
+// rows (`arows`), or per-letter rows (`wrows`) when it has word timings. Past lines are dimmed,
+// upcoming ones dimmer, the active one white; unlit letters of the active line light as
+// `lyric-ms` passes.
 component LyricLineView inherits Rectangle {
     in property <LyrLine> line;
     in property <int> state; // -1 past, 0 active, 1 upcoming, 2 unsynced
@@ -196,48 +126,48 @@ component LyricLineView inherits Rectangle {
     opacity: max(0, min(1, min(root.centre-y / (root.view-h * 0.10), (root.view-h - root.centre-y) / (root.view-h * 0.08))));
     property <bool> on: root.state == 0;
     property <length> fs: root.on ? root.active-size : root.size;
-    property <length> lh: root.fs * 1.35;
-    property <color> tone: root.on ? #ffffff : root.state == 1 ? #ffffff52 : #ffffff73;
+    property <length> lh: root.fs * LyrGeo.line-height;
+    property <color> tone: root.on ? Tokens.text-bright : root.state == 1 ? Tokens.text-faint : Tokens.text-tertiary;
     height: root.on ? root.line.ah : root.line.h;
 
     if !root.on || root.line.wrows.length == 0 : Rectangle {
         for row[k] in (root.on ? root.line.arows : root.line.rows) : Text {
             x: 0;
-            y: 16px + k * root.lh;
+            y: LyrGeo.line-pad + k * root.lh;
             height: root.lh;
             text: row;
             vertical-alignment: center;
-            font-family: "Bricolage Grotesque 36pt SemiCondensed";
-            font-weight: 700;
+            font-family: Tokens.font-lyrics;
+            font-weight: Tokens.weight-bold;
             font-size: root.fs;
-            letter-spacing: -0.015 * root.fs;
+            letter-spacing: LyrGeo.tracking * root.fs;
             color: root.tone;
-            animate color { duration: 120ms; easing: ease; }
+            animate color { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
         }
     }
     if root.on && root.line.wrows.length > 0 : Rectangle {
         for wrow[k] in root.line.wrows : HorizontalLayout {
             x: 0;
-            y: 16px + k * root.lh;
+            y: LyrGeo.line-pad + k * root.lh;
             height: root.lh;
             spacing: 0;
             alignment: start;
             for word in wrow.words : HorizontalLayout {
-                spacing: -0.015 * root.fs;
+                spacing: LyrGeo.tracking * root.fs;
                 for letter in word.letters : Text {
                     text: letter.ch;
                     vertical-alignment: center;
-                    font-family: "Bricolage Grotesque 36pt SemiCondensed";
-                    font-weight: 700;
+                    font-family: Tokens.font-lyrics;
+                    font-weight: Tokens.weight-bold;
                     font-size: root.fs;
                     // Lights instantly: a fade per letter would keep the renderer drawing at the
                     // display rate for the whole line. Frames happen only when a letter is due.
-                    color: Playback.lyric-ms >= letter.at ? #ffffff : #ffffff59;
+                    color: Playback.lyric-ms >= letter.at ? Tokens.text-bright : Tokens.text-faint;
                 }
                 if word.space : Text {
                     text: " ";
-                    font-family: "Bricolage Grotesque 36pt SemiCondensed";
-                    font-weight: 700;
+                    font-family: Tokens.font-lyrics;
+                    font-weight: Tokens.weight-bold;
                     font-size: root.fs;
                 }
             }
@@ -252,7 +182,7 @@ component LyricLineView inherits Rectangle {
 
 // .lyrics-lines: the column scrolls so the active line sits at the vertical centre (padding of
 // half the height above the first line and below the last). Smooth scroll on line change; a wheel
-// scroll pauses following for 3 s (lyrUserScrollAt in script.js).
+// scroll pauses following for a few seconds (lyrUserScrollAt in script.js).
 component LyricsColumn inherits Rectangle {
     in property <length> size;
     in property <length> active-size;
@@ -265,6 +195,10 @@ component LyricsColumn inherits Rectangle {
     property <length> offset;
     property <bool> paused;
     property <duration> resume-at;
+    // After a wheel scroll, following resumes this long after the last scroll. The timer that
+    // checks runs only while paused.
+    property <duration> resume-after: 3s;
+    property <duration> resume-poll: 250ms;
     clip: true;
 
     changed follow => {
@@ -275,7 +209,7 @@ component LyricsColumn inherits Rectangle {
     init => { root.offset = root.follow; }
 
     Timer {
-        interval: 250ms;
+        interval: root.resume-poll;
         running: root.paused;
         triggered => {
             if (animation-tick() >= root.resume-at) {
@@ -288,7 +222,7 @@ component LyricsColumn inherits Rectangle {
     TouchArea {
         scroll-event(e) => {
             root.paused = true;
-            root.resume-at = animation-tick() + 3s;
+            root.resume-at = animation-tick() + root.resume-after;
             root.offset = clamp(root.offset + e.delta-y, -Playback.lyr-total-h, 0px);
             return accept;
         }
@@ -299,7 +233,7 @@ component LyricsColumn inherits Rectangle {
         y: root.height / 2 + root.offset;
         width: parent.width;
         height: Playback.lyr-total-h;
-        animate y { duration: 500ms; easing: cubic-bezier(0.25, 0.1, 0.25, 1); }
+        animate y { duration: Tokens.duration-slow; easing: Tokens.ease-in-out; }
         VerticalLayout {
             alignment: start;
             spacing: 0;
@@ -325,6 +259,7 @@ component KaraokeWord inherits Rectangle {
     in property <KWord> w;
     in property <KMotion> m;
     property <length> em: root.w.base;
+    property <length> grid: 24px;
     visible: root.m.opacity > 0.004;
     z: root.m.z;
     width: root.w.tw + 0.56 * root.em;
@@ -357,6 +292,7 @@ component KaraokeWord inherits Rectangle {
         // Static per state, so the recoloured texture stays cached; fades go through opacity.
         colorize: root.w.color;
         opacity: root.m.opacity;
+        image-fit: fill;
         image-rendering: smooth;
     }
     if root.w.icon != "" && root.m.hl > 0.003 : Path {
@@ -370,7 +306,7 @@ component KaraokeWord inherits Rectangle {
         fill: transparent;
         stroke: Playback.k-highlight;
         opacity: root.m.hl;
-        stroke-width: 2.3 * 0.82 * root.em / 24px * 1px;
+        stroke-width: 2.3 * 0.82 * root.em / root.grid * Tokens.hairline;
         stroke-line-cap: round;
         stroke-line-join: round;
         transform-origin: { x: self.width / 2, y: self.height / 2 };
@@ -383,20 +319,21 @@ component SegButton inherits Rectangle {
     in property <string> label;
     in property <bool> pressed;
     callback clicked;
-    width: txt.preferred-width + 24px;
-    height: 30px;
-    border-radius: 9px;
-    background: root.pressed ? #ffffff : transparent;
-    animate background { duration: 200ms; }
+    property <length> seg-height: 30px;
+    width: txt.preferred-width + 2 * Tokens.space-md;
+    height: root.seg-height;
+    border-radius: Tokens.radius-md;
+    background: root.pressed ? Tokens.text-bright : ta.pressed ? Tokens.bg-pressed : ta.has-hover ? Tokens.bg-hover : transparent;
+    animate background { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
     txt := Text {
         text: root.label;
         horizontal-alignment: center;
         vertical-alignment: center;
-        font-family: "JetBrains Mono";
-        font-weight: 500;
-        font-size: 12px;
-        letter-spacing: 0.24px;
-        color: root.pressed ? #08080a : ta.has-hover ? #ffffff : #ffffffb3;
+        font-family: Tokens.font-mono;
+        font-weight: Tokens.weight-medium;
+        font-size: Tokens.size-caption;
+        letter-spacing: Tokens.tracking-caption;
+        color: root.pressed ? Tokens.text-inverse : ta.has-hover ? Tokens.text-bright : Tokens.text-secondary;
     }
     ta := TouchArea {
         mouse-cursor: pointer;
@@ -408,16 +345,19 @@ component SegButton inherits Rectangle {
 component Swatch inherits HorizontalLayout {
     in property <string> name;
     in property <color> value;
-    spacing: 7px;
+    property <length> dot: 22px;
+    property <length> ring: 2px;
+    spacing: Tokens.space-sm;
     Rectangle {
         y: (parent.height - self.height) / 2;
-        width: 22px;
-        height: 22px;
-        border-radius: 11px;
-        border-width: 2px;
-        border-color: #ffffff47;
+        width: root.dot;
+        height: root.dot;
+        border-radius: Tokens.radius-full;
+        border-width: root.ring;
+        border-color: ta.has-hover ? Tokens.text-secondary : Tokens.text-faint;
         background: root.value;
-        TouchArea {
+        animate border-color { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+        ta := TouchArea {
             mouse-cursor: pointer;
             pointer-event(e) => {
                 if (e.kind == PointerEventKind.up) {
@@ -429,33 +369,33 @@ component Swatch inherits HorizontalLayout {
     Text {
         text: root.name;
         vertical-alignment: center;
-        font-family: "JetBrains Mono";
-        font-weight: 500;
-        font-size: 12px;
-        color: #ffffffb3;
+        font-family: Tokens.font-mono;
+        font-weight: Tokens.weight-medium;
+        font-size: Tokens.size-caption;
+        color: Tokens.text-secondary;
     }
 }
 
 // .vk-settings: style segment + palette + reset.
 component KaraokeSettings inherits Rectangle {
-    height: 46px;
+    property <length> bar-height: 46px;
+    property <length> bar-gap: 14px;
+    height: root.bar-height;
     width: bar.preferred-width;
-    border-radius: 18px;
-    border-width: 1px;
-    border-color: #ffffff1a;
-    background: #141418b8;
+    border-radius: Tokens.radius-lg;
+    border-width: Tokens.hairline;
+    border-color: Tokens.border-strong;
+    background: Tokens.bg-overlay;
     bar := HorizontalLayout {
-        padding: 8px;
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 14px;
+        padding: Tokens.space-sm;
+        spacing: root.bar-gap;
         Rectangle {
             width: seg.preferred-width;
-            border-radius: 12px;
-            background: #ffffff0f;
+            border-radius: Tokens.radius-md;
+            background: Tokens.bg-hover;
             seg := HorizontalLayout {
                 padding: 0px;
-                spacing: 2px;
+                spacing: Tokens.space-2xs;
                 SegButton { label: "Ship"; pressed: Playback.k-style == "ship"; clicked => { Playback.set-k-style("ship"); } }
                 SegButton { label: "Fisheye"; pressed: Playback.k-style == "fisheye"; clicked => { Playback.set-k-style("fisheye"); } }
                 SegButton { label: "Fisheye Visual"; pressed: Playback.k-style == "fisheye-visual"; clicked => { Playback.set-k-style("fisheye-visual"); } }
@@ -466,15 +406,16 @@ component KaraokeSettings inherits Rectangle {
         Swatch { name: "highlight"; value: Playback.k-highlight; }
         Swatch { name: "secondary"; value: Playback.k-secondary; }
         Rectangle {
-            width: reset.preferred-width + 20px;
+            width: reset.preferred-width + 2 * Tokens.space-sm;
             reset := Text {
                 text: "reset";
                 vertical-alignment: center;
                 horizontal-alignment: center;
-                font-family: "JetBrains Mono";
-                font-weight: 500;
-                font-size: 12px;
-                color: reset-ta.has-hover ? #ffffff : #ffffffb3;
+                font-family: Tokens.font-mono;
+                font-weight: Tokens.weight-medium;
+                font-size: Tokens.size-caption;
+                color: reset-ta.has-hover ? Tokens.text-bright : Tokens.text-secondary;
+                animate color { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
             }
             reset-ta := TouchArea {
                 mouse-cursor: pointer;
@@ -484,23 +425,75 @@ component KaraokeSettings inherits Rectangle {
     }
 }
 
+// A small glass button for the per-song timing offset.
+component OffsetButton inherits Rectangle {
+    in property <string> label;
+    callback clicked;
+    property <length> button-width: 52px;
+    property <length> button-height: 28px;
+    width: root.button-width;
+    height: root.button-height;
+    border-radius: Tokens.radius-full;
+    background: ta.pressed ? Tokens.bg-pressed : ta.has-hover ? Tokens.bg-glass-hover : Tokens.bg-glass;
+    animate background { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+    Text {
+        text: root.label;
+        color: Tokens.text-primary;
+        font-size: Tokens.size-caption;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 export component LyricsOverlay inherits Rectangle {
     property <bool> karaoke: Playback.karaoke;
     property <length> pad: LyrGeo.pad-x(root.width);
     property <length> side: LyrGeo.side-w(root.width);
     property <length> col-x: root.pad + root.side + root.pad;
-    // .lyrics-side block: art, 18 gap, title, 5, artist, 20, 5px progress, then times and transport.
-    property <length> prog-y: root.side + 18px + 22px + 5px + 18px + 20px;
-    property <length> side-h: root.prog-y + 5px + 8px + 16px + 10px + 56px;
-    // Karaoke chrome hides after 3 s without pointer movement.
+    // .lyrics-side block: art, gap, title, gap, artist, gap, progress bar, then times and transport.
+    property <length> title-gap: 18px;
+    property <length> title-h: 22px;
+    property <length> artist-gap: 5px;
+    property <length> artist-h: 18px;
+    property <length> prog-gap: 20px;
+    property <length> prog-h: 5px;
+    property <length> times-gap: 8px;
+    property <length> times-h: 16px;
+    property <length> transport-gap: 10px;
+    property <length> prog-y: root.side + root.title-gap + root.title-h + root.artist-gap + root.artist-h + root.prog-gap;
+    property <length> side-h: root.prog-y + root.prog-h + root.times-gap + root.times-h + root.transport-gap + LyrChrome.disc;
+    property <length> side-top: (root.height - root.side-h) / 2;
+    // The blurred background is drawn larger than the window so its soft edge stays outside.
+    property <length> bleed: 40px;
+    // Art shadow on the classic view.
+    property <length> art-shadow-blur: 70px;
+    property <length> art-shadow-offset: Tokens.space-xl;
+    // Lyrics column inset from the window top and bottom.
+    property <length> column-inset: Tokens.space-xl;
+    // Timing offset row.
+    property <length> offset-h: 28px;
+    property <length> offset-label: 72px;
+    // Karaoke: small art + title bottom left, thin progress bar along the bottom.
+    property <length> meta-art: 44px;
+    property <float> meta-share: 0.34;
+    property <length> stage-prog: 3px;
+    property <length> hint-h: 18px;
+    // Karaoke chrome hides after `idle-after` without pointer movement. The timer that checks runs
+    // only on the karaoke stage while the chrome is showing.
     property <bool> idle;
     property <duration> moved-at;
+    property <duration> idle-after: 3s;
+    property <duration> idle-poll: 500ms;
     changed karaoke => { root.idle = false; root.moved-at = animation-tick(); }
 
     opacity: Playback.expanded ? 1 : 0;
     visible: self.opacity > 0.01;
-    animate opacity { duration: 350ms; easing: ease; }
-    background: root.karaoke ? #050507 : #08080a;
+    animate opacity { duration: Tokens.duration-slow; easing: Tokens.ease-out; }
+    background: root.karaoke ? Tokens.bg-stage : Tokens.bg-base;
 
     // Swallow clicks so nothing behind the overlay reacts; track the pointer for the idle fade.
     TouchArea {
@@ -509,10 +502,10 @@ export component LyricsOverlay inherits Rectangle {
         changed mouse-y => { root.idle = false; root.moved-at = animation-tick(); }
     }
     Timer {
-        interval: 500ms;
+        interval: root.idle-poll;
         running: root.karaoke && !root.idle && Playback.expanded;
         triggered => {
-            if (animation-tick() - root.moved-at >= 3s) {
+            if (animation-tick() - root.moved-at >= root.idle-after) {
                 root.idle = true;
             }
         }
@@ -520,22 +513,20 @@ export component LyricsOverlay inherits Rectangle {
 
     // ---- classic view --------------------------------------------------------------------
     if !root.karaoke : Rectangle {
-        // .lyrics-bg: the art blurred (Rust pre-blurs and darkens a tiny copy; the scaler smooths it).
-        // .lyrics-bg + .lyrics-vignette: one pre-rendered image (see art::blurred_bg).
-        Image {
-            x: -40px;
-            y: -40px;
-            width: parent.width + 80px;
-            height: parent.height + 80px;
+        // .lyrics-bg + .lyrics-vignette: one pre-rendered image (see art::blurred_bg). Rust pre-blurs
+        // and darkens a tiny copy; the scaler smooths it.
+        Crossfade {
+            x: -root.bleed;
+            y: -root.bleed;
+            width: parent.width + 2 * root.bleed;
+            height: parent.height + 2 * root.bleed;
             source: Playback.bg-art;
-            image-fit: cover;
-            image-rendering: smooth;
         }
 
         // .lyrics-side
         Rectangle {
             x: root.pad;
-            y: (parent.height - root.side-h) / 2;
+            y: root.side-top;
             width: root.side;
             height: root.side-h;
             Rectangle {
@@ -543,54 +534,54 @@ export component LyricsOverlay inherits Rectangle {
                 y: 0;
                 width: root.side;
                 height: root.side;
-                border-radius: 14px;
-                drop-shadow-offset-y: 24px;
-                drop-shadow-blur: 70px;
-                drop-shadow-color: #0000008c;
-                background: Playback.side-art.width > 0 ? transparent : #1a1a1e;
-                Image {
+                border-radius: Tokens.radius-lg;
+                drop-shadow-offset-y: root.art-shadow-offset;
+                drop-shadow-blur: root.art-shadow-blur;
+                drop-shadow-color: Tokens.shadow;
+                background: Playback.side-art.width > 0 ? transparent : Tokens.art-placeholder;
+                Crossfade {
                     width: parent.width;
                     height: parent.height;
                     source: Playback.side-art;
-                    image-fit: cover;
+                    fade: Playback.art-fresh;
                 }
             }
             Text {
                 x: 0;
-                y: root.side + 18px;
+                y: root.side + root.title-gap;
                 width: root.side;
-                height: 22px;
+                height: root.title-h;
                 text: Playback.title;
                 overflow: elide;
                 vertical-alignment: center;
-                font-family: "Bricolage Grotesque";
-                font-weight: 600;
-                font-size: 17px;
-                color: #ffffff;
+                font-family: Tokens.font-lyrics-ui;
+                font-weight: Tokens.weight-semibold;
+                font-size: Tokens.size-heading;
+                color: Tokens.text-bright;
             }
             Text {
                 x: 0;
-                y: root.side + 18px + 22px + 5px;
+                y: root.side + root.title-gap + root.title-h + root.artist-gap;
                 width: root.side;
-                height: 18px;
+                height: root.artist-h;
                 text: Playback.artist;
                 overflow: elide;
                 vertical-alignment: center;
-                font-size: 14px;
-                color: #ffffff8c;
+                font-size: Tokens.size-body;
+                color: Tokens.text-secondary;
             }
             Rectangle {
                 x: 0;
                 y: root.prog-y;
                 width: root.side;
-                height: 5px;
-                border-radius: 2.5px;
-                background: #ffffff24;
+                height: root.prog-h;
+                border-radius: Tokens.radius-full;
+                background: Tokens.bg-track;
                 Rectangle {
                     x: 0;
                     width: Playback.duration-ms > 0 ? parent.width * clamp(Playback.position-ms / Playback.duration-ms, 0, 1) : 0px;
-                    border-radius: 2.5px;
-                    background: #ffffffd9;
+                    border-radius: Tokens.radius-full;
+                    background: Tokens.text-primary;
                 }
                 TouchArea {
                     mouse-cursor: pointer;
@@ -606,64 +597,54 @@ export component LyricsOverlay inherits Rectangle {
         // Times and transport under the progress bar.
         Rectangle {
             x: root.pad;
-            y: (parent.height - root.side-h) / 2 + root.prog-y + 13px;
+            y: root.side-top + root.prog-y + root.prog-h + root.times-gap;
             width: root.side;
-            height: 16px;
+            height: root.times-h;
             Text {
                 x: 0;
                 text: Clock.mmss(Playback.position-ms);
-                font-size: 12px;
-                color: #ffffff8c;
+                font-size: Tokens.size-caption;
+                color: Tokens.text-tertiary;
             }
             Text {
                 x: parent.width - self.width;
                 text: Clock.mmss(Playback.duration-ms);
-                font-size: 12px;
-                color: #ffffff8c;
+                font-size: Tokens.size-caption;
+                color: Tokens.text-tertiary;
             }
         }
         Transport {
             x: root.pad;
-            y: (parent.height - root.side-h) / 2 + root.side-h - 56px;
+            y: root.side-top + root.side-h - LyrChrome.disc;
             width: root.side;
-            height: 56px;
+            height: LyrChrome.disc;
         }
         // Per-song lyrics timing offset.
         if Playback.lyr-synced && !Playback.karaoke : HorizontalLayout {
             x: root.pad;
-            y: (parent.height - root.side-h) / 2 + root.side-h + 8px;
+            y: root.side-top + root.side-h + Tokens.space-sm;
             width: root.side;
-            height: 28px;
+            height: root.offset-h;
             alignment: center;
-            spacing: 8px;
-            Rectangle {
-                width: 52px; height: 28px; border-radius: 14px;
-                background: om.has-hover ? #ffffff2e : #ffffff14;
-                Text { text: "−0.1s"; color: #ffffffcc; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
-                om := TouchArea { clicked => { Playback.lyrics-offset(-100); } }
-            }
+            spacing: Tokens.space-sm;
+            OffsetButton { label: "−0.1s"; clicked => { Playback.lyrics-offset(-100); } }
             Text {
-                width: 72px;
+                width: root.offset-label;
                 text: Playback.lyr-offset == 0 ? "lyrics in sync" : (Playback.lyr-offset > 0 ? "+" : "") + Playback.lyr-offset / 1000 + "s";
-                color: #ffffff8c;
-                font-size: 12px;
+                color: Tokens.text-tertiary;
+                font-size: Tokens.size-caption;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
-            Rectangle {
-                width: 52px; height: 28px; border-radius: 14px;
-                background: op.has-hover ? #ffffff2e : #ffffff14;
-                Text { text: "+0.1s"; color: #ffffffcc; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
-                op := TouchArea { clicked => { Playback.lyrics-offset(100); } }
-            }
+            OffsetButton { label: "+0.1s"; clicked => { Playback.lyrics-offset(100); } }
         }
 
         // .lyrics-lines
         LyricsColumn {
             x: root.col-x;
-            y: 24px;
+            y: root.column-inset;
             width: max(0px, root.width - root.col-x - root.pad);
-            height: parent.height - 48px;
+            height: parent.height - 2 * root.column-inset;
             size: LyrGeo.size(root.width);
             active-size: LyrGeo.active-size(root.width);
         }
@@ -683,44 +664,46 @@ export component LyricsOverlay inherits Rectangle {
 
         // .vk-meta
         Rectangle {
-            x: 22px;
-            y: parent.height - 22px - 44px;
-            width: min(parent.width * 0.34, 44px + 12px + max(mt.preferred-width, ma.preferred-width));
-            height: 44px;
+            x: LyrChrome.edge;
+            y: parent.height - LyrChrome.edge - root.meta-art;
+            width: min(parent.width * root.meta-share, root.meta-art + Tokens.space-md + max(mt.preferred-width, ma.preferred-width));
+            height: root.meta-art;
             opacity: root.idle ? 0 : 1;
-            animate opacity { duration: 350ms; easing: ease; }
+            animate opacity { duration: Tokens.duration-slow; easing: Tokens.ease-out; }
             Image {
                 x: 0;
-                width: 44px;
-                height: 44px;
+                width: root.meta-art;
+                height: root.meta-art;
                 source: Playback.thumb-art;
+                image-fit: cover;
+                image-rendering: smooth;
             }
             mt := Text {
-                x: 56px;
-                y: 4px;
-                width: parent.width - 56px;
+                x: root.meta-art + Tokens.space-md;
+                y: Tokens.space-xs;
+                width: parent.width - self.x;
                 text: Playback.title;
                 overflow: elide;
-                font-family: "Bricolage Grotesque";
-                font-weight: 600;
-                font-size: 14px;
-                color: #ffffff;
+                font-family: Tokens.font-lyrics-ui;
+                font-weight: Tokens.weight-semibold;
+                font-size: Tokens.size-body;
+                color: Tokens.text-bright;
             }
             ma := Text {
-                x: 56px;
-                y: 24px;
-                width: parent.width - 56px;
+                x: root.meta-art + Tokens.space-md;
+                y: Tokens.space-xl;
+                width: parent.width - self.x;
                 text: Playback.artist;
                 overflow: elide;
-                font-size: 12px;
-                color: #ffffff8c;
+                font-size: Tokens.size-caption;
+                color: Tokens.text-tertiary;
             }
         }
         // .vk-prog
         Rectangle {
-            y: parent.height - 3px;
-            height: 3px;
-            background: #ffffff0f;
+            y: parent.height - root.stage-prog;
+            height: root.stage-prog;
+            background: Tokens.bg-hover;
             Rectangle {
                 x: 0;
                 width: Playback.duration-ms > 0 ? parent.width * clamp(Playback.position-ms / Playback.duration-ms, 0, 1) : 0px;
@@ -729,62 +712,59 @@ export component LyricsOverlay inherits Rectangle {
         }
         KaraokeSettings {
             x: (parent.width - self.width) / 2;
-            y: parent.height - 22px - self.height;
+            y: parent.height - LyrChrome.edge - self.height;
             opacity: root.idle ? 0 : 1;
-            animate opacity { duration: 350ms; easing: ease; }
+            animate opacity { duration: Tokens.duration-slow; easing: Tokens.ease-out; }
         }
     }
 
     // ---- controls (.lyrics-controls) -----------------------------------------------------
     HorizontalLayout {
-        x: root.width - 28px - self.width;
-        y: 22px;
+        x: root.width - LyrChrome.edge - self.width;
+        y: LyrChrome.edge;
         width: self.preferred-width;
-        height: 38px;
-        spacing: 12px;
+        height: LyrChrome.pill;
+        spacing: Tokens.space-md;
         opacity: (root.karaoke && root.idle) ? 0 : 1;
-        animate opacity { duration: 300ms; easing: ease; }
+        animate opacity { duration: Tokens.duration-slow; easing: Tokens.ease-out; }
         // Karaoke hides the side column, so its transport sits up here.
         if root.karaoke : Rectangle {
-            width: kt.preferred-width + 8px;
-            border-radius: 19px;
-            border-width: 1px;
-            border-color: #ffffff24;
-            background: #ffffff14;
+            width: kt.preferred-width + 2 * Tokens.space-xs;
+            border-radius: Tokens.radius-full;
+            border-width: Tokens.hairline;
+            border-color: Tokens.border-strong;
+            background: Tokens.bg-glass;
             kt := HorizontalLayout {
-                x: 4px;
-                spacing: 2px;
+                x: Tokens.space-xs;
+                spacing: Tokens.space-2xs;
                 alignment: center;
-                TransportButton { y: (parent.height - self.height) / 2; width: 34px; height: 34px; icon: Icons.prev; solid: true; icon-size: 16px; clicked => { Playback.prev(); } }
-                TransportButton { y: (parent.height - self.height) / 2; width: 34px; height: 34px; icon: Playback.playing ? Icons.pause : Icons.play; solid: true; icon-size: 16px; clicked => { Playback.play-pause(); } }
-                TransportButton { y: (parent.height - self.height) / 2; width: 34px; height: 34px; icon: Icons.next; solid: true; icon-size: 16px; clicked => { Playback.next(); } }
+                IconButton { y: (parent.height - self.height) / 2; round: true; size: Tokens.control-sm; icon: Icons.prev; solid: true; tint: Tokens.text-bright; icon-size: Tokens.icon-sm; clicked => { Playback.prev(); } }
+                IconButton { y: (parent.height - self.height) / 2; round: true; size: Tokens.control-sm; icon: Playback.playing ? Icons.pause : Icons.play; solid: true; tint: Tokens.text-bright; icon-size: Tokens.icon-sm; clicked => { Playback.play-pause(); } }
+                IconButton { y: (parent.height - self.height) / 2; round: true; size: Tokens.control-sm; icon: Icons.next; solid: true; tint: Tokens.text-bright; icon-size: Tokens.icon-sm; clicked => { Playback.next(); } }
             }
         }
         if Playback.karaoke-allowed : Pill {
             label: "Karaoke";
             icon: Icons.mic;
             active: Playback.karaoke;
-            opacity: Playback.karaoke-available ? 1 : 0.4;
-            clicked => {
-                if (Playback.karaoke-available) {
-                    Playback.set-karaoke(!Playback.karaoke);
-                }
-            }
+            enabled: Playback.karaoke-available;
+            clicked => { Playback.set-karaoke(!Playback.karaoke); }
         }
-        CloseButton {
+        Pill {
+            icon: Icons.close;
             clicked => { Playback.expanded = false; }
         }
     }
 
     // .lyrics-hint
     if Playback.lyr-hint != "" : Text {
-        x: 20px;
-        y: parent.height - 26px - 18px;
-        width: parent.width - 40px;
-        height: 18px;
+        x: Tokens.space-xl;
+        y: parent.height - Tokens.space-xl - root.hint-h;
+        width: parent.width - 2 * Tokens.space-xl;
+        height: root.hint-h;
         text: Playback.lyr-hint;
         horizontal-alignment: center;
-        font-size: 12px;
-        color: #ffffff66;
+        font-size: Tokens.size-caption;
+        color: Tokens.text-faint;
     }
 }

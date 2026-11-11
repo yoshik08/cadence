@@ -1,7 +1,8 @@
 // Now playing: the `Playback` state global (Rust writes it, the UI reads it), the bottom bar and
 // the expanded view. Rust sets `position-ms` on player events; the bar's Timer only interpolates
 // between events. Nothing here takes keyboard focus.
-import { Theme } from "theme.slint";
+import { Tokens } from "tokens.slint";
+import { Glyph, IconButton } from "base.slint";
 import { Cover } from "cover.slint";
 
 
@@ -83,7 +84,9 @@ export global Playback {
     in property <image> side-art;
     in property <image> thumb-art;
     in property <image> bg-art;
-    in-out property <color> accent: Theme.accent;
+    // The art was downloaded just now, so it fades in; cached art (false) appears at once.
+    in property <bool> art-fresh;
+    in-out property <color> accent: Tokens.accent;
     // Rust owns the clock: it writes position-ms from a monotonic anchor, never from a UI timer.
     in-out property <int> position-ms;
     in-out property <int> duration-ms;
@@ -120,9 +123,9 @@ export global Playback {
     in property <bool> karaoke-available;
     in property <bool> karaoke;
     in property <string> k-style: "visual";
-    in property <color> k-lyric: #ffffff;
-    in property <color> k-highlight: #ff3d8b;
-    in property <color> k-secondary: #d6906c;
+    in property <color> k-lyric: Tokens.karaoke-lyric;
+    in property <color> k-highlight: Tokens.karaoke-highlight;
+    in property <color> k-secondary: Tokens.karaoke-secondary;
     in property <[KWord]> k-words;
     in property <[KMotion]> k-motion;
     in property <image> k-bg;
@@ -199,82 +202,24 @@ global Fmt {
     }
 }
 
-component Icon inherits Path {
-    in property <length> size: 20px;
-    in property <bool> solid;
-    in property <color> tint: Theme.text;
-    width: root.size;
-    height: root.size;
-    viewbox-width: 24;
-    viewbox-height: 24;
-    fill: root.solid ? root.tint : transparent;
-    stroke: root.tint;
-    stroke-width: (root.solid ? 0.6px : 1.75px) * (root.size / 24px);
-    stroke-line-cap: round;
-    stroke-line-join: round;
-    animate fill, stroke { duration: Theme.duration-fast; easing: Theme.ease; }
-}
-
-// Quiet icon button: hover and press tint the background, hover brightens the glyph.
-export component IconButton inherits Rectangle {
-    in property <string> commands;
-    out property <bool> has-hover: touch.has-hover;
-    in property <length> icon-size: 20px;
-    in property <bool> solid;
-    in property <bool> active;
-    in property <color> active-color: Theme.accent;
-    in property <bool> enabled: true;
-    callback clicked;
-    width: 36px;
-    height: 36px;
-    border-radius: Theme.radius-control;
-    opacity: root.enabled ? 1 : 0.35;
-    background: !root.enabled ? transparent : touch.pressed ? Theme.pressed : touch.has-hover ? Theme.hover : transparent;
-    animate background { duration: Theme.duration-fast; easing: Theme.ease; }
-
-    Icon {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        size: root.icon-size;
-        solid: root.solid;
-        commands: root.commands;
-        tint: root.active ? root.active-color : (touch.has-hover && root.enabled) ? Theme.text : Theme.text-secondary;
-    }
-    // A dot under toggled icons, so state does not rely on colour alone.
-    Rectangle {
-        visible: root.active;
-        width: 4px;
-        height: 4px;
-        border-radius: 2px;
-        background: root.active-color;
-        x: (parent.width - self.width) / 2;
-        y: (parent.height + root.icon-size) / 2 + 2px;
-    }
-    touch := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
 // The one prominent control: a near-white disc.
-component PlayButton inherits Rectangle {
-    in property <length> diameter: 44px;
+export component PlayButton inherits Rectangle {
+    in property <length> diameter: Tokens.control-lg;
     in property <bool> enabled: true;
     callback clicked;
     width: root.diameter;
     height: root.diameter;
-    border-radius: root.diameter / 2;
-    opacity: root.enabled ? 1 : 0.35;
-    background: (touch.pressed && root.enabled) ? Theme.text-secondary : (touch.has-hover && root.enabled) ? #ffffff : Theme.text;
-    animate background { duration: Theme.duration-fast; easing: Theme.ease; }
+    border-radius: Tokens.radius-full;
+    opacity: root.enabled ? 1 : Tokens.disabled-opacity;
+    background: (touch.pressed && root.enabled) ? Tokens.bg-inverse-pressed : (touch.has-hover && root.enabled) ? Tokens.bg-inverse-hover : Tokens.bg-inverse;
+    animate background { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
 
-    Icon {
+    Glyph {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         size: root.diameter * 0.5;
         solid: true;
-        tint: Theme.bg;
+        tint: Tokens.text-inverse;
         commands: Playback.playing ? Icons.pause : Icons.play;
     }
     touch := TouchArea {
@@ -286,9 +231,9 @@ component PlayButton inherits Rectangle {
 
 // Thin slider. While pressed it shows the drag position; `live` fires on every change of the
 // drag, `released` once at the end (also for a plain click). `value` is 0..1.
-component Scrubber inherits Rectangle {
+export component Scrubber inherits Rectangle {
     in property <float> value;
-    in property <color> fill-color: Theme.accent;
+    in property <color> fill-color: Tokens.accent;
     in property <bool> enabled: true;
     out property <bool> dragging: touch.pressed;
     out property <float> shown: touch.pressed ? root.drag : Math.clamp(root.value, 0, 1);
@@ -296,32 +241,33 @@ component Scrubber inherits Rectangle {
     callback released(float);
     property <float> drag;
     property <bool> hot: root.enabled && (touch.has-hover || touch.pressed);
-    height: 20px;
-    opacity: root.enabled ? 1 : 0.35;
+    property <length> thumb: Tokens.icon-xs;
+    height: Tokens.icon-md;
+    opacity: root.enabled ? 1 : Tokens.disabled-opacity;
 
     Rectangle {
         y: (parent.height - self.height) / 2;
-        height: 4px;
-        border-radius: 2px;
-        background: Theme.track;
+        height: Tokens.track-height;
+        border-radius: Tokens.radius-full;
+        background: Tokens.bg-track;
         Rectangle {
             x: 0;
             y: 0;
             width: parent.width * root.shown;
             height: 100%;
-            border-radius: 2px;
+            border-radius: Tokens.radius-full;
             background: root.fill-color;
         }
     }
     Rectangle {
-        width: 12px;
-        height: 12px;
-        border-radius: 6px;
-        background: #ffffff;
+        width: root.thumb;
+        height: root.thumb;
+        border-radius: Tokens.radius-full;
+        background: Tokens.text-bright;
         x: root.width * root.shown - self.width / 2;
         y: (parent.height - self.height) / 2;
         opacity: root.hot ? 1 : 0;
-        animate opacity { duration: Theme.duration-fast; easing: Theme.ease; }
+        animate opacity { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
     }
     touch := TouchArea {
         enabled: root.enabled;
@@ -345,65 +291,109 @@ component Scrubber inherits Rectangle {
     }
 }
 
-// 88px tall, any width.
+// A text button in the bar (podcast speed, sleep timer): quiet until hovered.
+component BarChip inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <color> ink: Tokens.text-secondary;
+    callback clicked-at(length, length);
+    property <bool> has-icon: root.icon != "";
+    width: (root.has-icon ? Tokens.control-md : Tokens.space-md) + (root.text != "" ? label.preferred-width + Tokens.space-md : 0px);
+    height: Tokens.control-md;
+    border-radius: Tokens.radius-md;
+    background: touch.pressed ? Tokens.bg-pressed : touch.has-hover ? Tokens.bg-hover : transparent;
+    animate background { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+    if root.has-icon : Glyph {
+        x: (Tokens.control-md - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        size: Tokens.icon-md;
+        commands: root.icon;
+        tint: root.ink == Tokens.text-secondary && touch.has-hover ? Tokens.text-primary : root.ink;
+    }
+    label := Text {
+        x: root.has-icon ? Tokens.control-md - Tokens.space-2xs : Tokens.space-md;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.text;
+        color: root.ink;
+        font-size: Tokens.size-caption;
+        font-weight: Tokens.weight-semibold;
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked-at(self.absolute-position.x, self.absolute-position.y - Tokens.space-sm); }
+    }
+}
+
+// The bottom bar: Tokens.bar-height tall, any width.
 export component NowPlayingBar inherits Rectangle {
     property <bool> idle: Playback.title == "";
     property <color> accent: Playback.accent;
-    property <length> centre-w: Math.min(520px, root.width * 0.42);
-    property <length> side-w: (root.width - root.centre-w) / 2 - 2 * Theme.space-xl;
+    // The transport block is at most this wide, and at most this share of the bar.
+    property <length> centre-max: 520px;
+    property <float> centre-share: 0.42;
+    property <length> centre-w: Math.min(root.centre-max, root.width * root.centre-share);
+    property <length> side-w: (root.width - root.centre-w) / 2 - 2 * Tokens.space-xl;
+    // Transport row plus seek row.
+    property <length> centre-h: 68px;
+    property <length> time-width: 40px;
+    // Below this side width the panel and mini-player buttons are dropped.
+    property <length> roomy-from: 296px;
+    property <length> volume-min: 56px;
+    property <length> volume-max: 120px;
+    // The "1" badge on Repeat one.
+    property <length> badge: Tokens.icon-xs;
     property <float> saved-volume: 0.6;
     property <int> last-sent: -1;
-    animate accent { duration: Theme.duration-normal; easing: Theme.ease; }
-    height: 88px;
-    background: Theme.bg;
+    animate accent { duration: Tokens.duration-base; easing: Tokens.ease-out; }
+    height: Tokens.bar-height;
+    background: Tokens.bg-base;
 
     Rectangle {
         y: 0;
-        height: 1px;
-        background: Theme.divider;
+        height: Tokens.hairline;
+        background: Tokens.border;
     }
 
     // Left: art and track, click opens the full view.
     Rectangle {
-        x: Theme.space-xl;
+        x: Tokens.space-xl;
         y: (root.height - self.height) / 2;
         width: root.side-w;
-        height: 56px;
+        height: Tokens.art-thumb;
         Cover {
             x: 0;
             y: 0;
-            width: 56px;
-            height: 56px;
+            width: Tokens.art-thumb;
+            height: Tokens.art-thumb;
             source: Playback.bar-art.width > 0 ? Playback.bar-art : Playback.art;
-            radius: Theme.radius-thumb;
-            backdrop: Theme.bg;
+            radius: Tokens.radius-md;
+            backdrop: Tokens.bg-base;
+            fade: Playback.art-fresh;
+            placeholder: root.idle ? Tokens.bg-surface : Tokens.art-placeholder;
         }
         VerticalLayout {
-            x: 56px + Theme.space-md + 2px;
+            x: Tokens.art-thumb + Tokens.space-md;
             width: parent.width - self.x;
             alignment: center;
-            spacing: 2px;
-            HorizontalLayout {
-                spacing: 6px;
-                Text {
-                    text: Playback.title;
-                    color: Theme.text;
-                    font-size: Theme.size-body;
-                    font-weight: Theme.weight-semibold;
-                    overflow: elide;
-                    horizontal-stretch: 1;
-                }
+            spacing: Tokens.space-2xs;
+            Text {
+                text: Playback.title;
+                color: Tokens.text-primary;
+                font-size: Tokens.size-body;
+                font-weight: Tokens.weight-semibold;
+                overflow: elide;
             }
             Text {
                 text: Playback.artist;
-                color: Theme.text-secondary;
-                font-size: Theme.size-caption;
-                letter-spacing: Theme.tracking-caption;
+                color: Tokens.text-secondary;
+                font-size: Tokens.size-caption;
+                letter-spacing: Tokens.tracking-caption;
                 overflow: elide;
             }
         }
         TouchArea {
-            width: parent.width - (Playback.like-known ? 40px : 0px);
+            width: parent.width - (Playback.like-known ? Tokens.control-lg : 0px);
             enabled: !root.idle;
             mouse-cursor: MouseCursor.pointer;
             clicked => { Playback.expanded = true; }
@@ -418,16 +408,16 @@ export component NowPlayingBar inherits Rectangle {
     // Centre: transport above the seek bar.
     VerticalLayout {
         x: (root.width - root.centre-w) / 2;
-        y: 10px;
+        y: (root.height - root.centre-h) / 2;
         width: root.centre-w;
-        height: 68px;
-        spacing: 6px;
+        height: root.centre-h;
+        spacing: Tokens.space-xs;
         HorizontalLayout {
             alignment: center;
-            spacing: Theme.space-sm;
+            spacing: Tokens.space-sm;
             IconButton {
                 y: (parent.height - self.height) / 2;
-                commands: Icons.shuffle;
+                icon: Icons.shuffle;
                 active: Playback.shuffle;
                 active-color: root.accent;
                 enabled: !root.idle;
@@ -435,50 +425,47 @@ export component NowPlayingBar inherits Rectangle {
             }
             IconButton {
                 y: (parent.height - self.height) / 2;
-                width: 40px;
-                height: 40px;
-                icon-size: 22px;
+                size: Tokens.control-lg;
+                icon-size: Tokens.icon-lg;
                 solid: true;
-                commands: Icons.prev;
+                icon: Icons.prev;
                 enabled: !root.idle;
                 clicked => { Playback.prev(); }
             }
             PlayButton {
                 y: (parent.height - self.height) / 2;
-                diameter: 44px;
                 enabled: !root.idle;
                 clicked => { Playback.play-pause(); }
             }
             IconButton {
                 y: (parent.height - self.height) / 2;
-                width: 40px;
-                height: 40px;
-                icon-size: 22px;
+                size: Tokens.control-lg;
+                icon-size: Tokens.icon-lg;
                 solid: true;
-                commands: Icons.next;
+                icon: Icons.next;
                 enabled: !root.idle;
                 clicked => { Playback.next(); }
             }
             IconButton {
                 y: (parent.height - self.height) / 2;
-                commands: Icons.repeat;
+                icon: Icons.repeat;
                 active: Playback.repeat > 0;
                 active-color: root.accent;
                 enabled: !root.idle;
                 clicked => { Playback.toggle-repeat(); }
                 // Repeat one.
                 if Playback.repeat == 2 : Rectangle {
-                    x: parent.width - 15px;
-                    y: 3px;
-                    width: 12px;
-                    height: 12px;
-                    border-radius: 6px;
+                    x: parent.width - root.badge - Tokens.space-2xs;
+                    y: Tokens.space-2xs;
+                    width: root.badge;
+                    height: root.badge;
+                    border-radius: Tokens.radius-full;
                     background: root.accent;
                     Text {
                         text: "1";
-                        font-size: 9px;
-                        font-weight: 700;
-                        color: Theme.on-accent;
+                        font-size: Tokens.size-micro;
+                        font-weight: Tokens.weight-bold;
+                        color: Tokens.on-accent;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -486,15 +473,15 @@ export component NowPlayingBar inherits Rectangle {
             }
         }
         HorizontalLayout {
-            spacing: Theme.space-sm;
+            spacing: Tokens.space-sm;
             Text {
-                width: 40px;
+                width: root.time-width;
                 horizontal-alignment: right;
                 vertical-alignment: center;
                 text: root.idle ? "" : Fmt.mmss(seek.dragging ? Math.round(seek.shown * Playback.duration-ms) : Playback.position-ms);
-                color: Theme.text-tertiary;
-                font-size: Theme.size-caption;
-                letter-spacing: Theme.tracking-caption;
+                color: Tokens.text-tertiary;
+                font-size: Tokens.size-caption;
+                letter-spacing: Tokens.tracking-caption;
             }
             seek := Scrubber {
                 horizontal-stretch: 1;
@@ -507,21 +494,21 @@ export component NowPlayingBar inherits Rectangle {
                 }
             }
             Text {
-                width: 40px;
+                width: root.time-width;
                 vertical-alignment: center;
                 text: root.idle ? "" : Fmt.mmss(Playback.duration-ms);
-                color: Theme.text-tertiary;
-                font-size: Theme.size-caption;
-                letter-spacing: Theme.tracking-caption;
+                color: Tokens.text-tertiary;
+                font-size: Tokens.size-caption;
+                letter-spacing: Tokens.tracking-caption;
             }
         }
     }
 
     // Like the current track (Web API; hidden until its state is known).
     if Playback.like-known && !root.idle : IconButton {
-        x: Theme.space-xl + root.side-w - 36px;
+        x: Tokens.space-xl + root.side-w - self.width;
         y: (root.height - self.height) / 2;
-        commands: Icons.heart;
+        icon: Icons.heart;
         solid: Playback.liked;
         active: Playback.liked;
         active-color: root.accent;
@@ -530,71 +517,41 @@ export component NowPlayingBar inherits Rectangle {
 
     // Right: volume (click the speaker to mute) and expand.
     HorizontalLayout {
-        x: root.width - Theme.space-xl - root.side-w;
+        x: root.width - Tokens.space-xl - root.side-w;
         y: (root.height - self.height) / 2;
         width: root.side-w;
-        height: 36px;
+        height: Tokens.control-md;
         alignment: end;
-        spacing: Theme.space-xs;
-        if Playback.is-episode : Rectangle {
-            width: 44px;
-            height: 36px;
-            border-radius: Theme.radius-control;
-            background: sp-ta.has-hover ? Theme.hover : transparent;
-            Text {
-                text: Playback.speed == 1 ? "1×" : Math.round(Playback.speed * 100) / 100 + "×";
-                color: Playback.speed == 1 ? Theme.text-secondary : root.accent;
-                font-size: Theme.size-caption;
-                font-weight: Theme.weight-semibold;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-            sp-ta := TouchArea { clicked => { Playback.speed-menu(self.absolute-position.x, self.absolute-position.y - 8px); } }
+        spacing: Tokens.space-xs;
+        if Playback.is-episode : BarChip {
+            text: Playback.speed == 1 ? "1×" : Math.round(Playback.speed * 100) / 100 + "×";
+            ink: Playback.speed == 1 ? Tokens.text-secondary : root.accent;
+            clicked-at(x, y) => { Playback.speed-menu(x, y); }
         }
-        Rectangle {
-            width: Playback.sleep-label != "" ? 36px + sl.preferred-width + 4px : 36px;
-            height: 36px;
-            border-radius: Theme.radius-control;
-            background: sleep-ta.has-hover ? Theme.hover : transparent;
-            Path {
-                x: 8px; y: 8px; width: 20px; height: 20px;
-                viewbox-width: 24; viewbox-height: 24;
-                commands: Icons.moon;
-                fill: transparent;
-                stroke: Playback.sleep-label != "" ? root.accent : (sleep-ta.has-hover ? Theme.text : Theme.text-secondary);
-                stroke-width: 1.5px;
-                stroke-line-cap: round;
-                stroke-line-join: round;
-            }
-            sl := Text {
-                x: 34px;
-                height: parent.height;
-                vertical-alignment: center;
-                text: Playback.sleep-label;
-                color: root.accent;
-                font-size: Theme.size-caption;
-                font-weight: Theme.weight-semibold;
-            }
-            sleep-ta := TouchArea { clicked => { Playback.sleep-menu(self.absolute-position.x, self.absolute-position.y - 8px); } }
+        BarChip {
+            icon: Icons.moon;
+            text: Playback.sleep-label;
+            ink: Playback.sleep-label != "" ? root.accent : Tokens.text-secondary;
+            clicked-at(x, y) => { Playback.sleep-menu(x, y); }
         }
         IconButton {
-            commands: Icons.queue;
+            icon: Icons.queue;
             active: Playback.queue-open;
             active-color: root.accent;
             clicked => { Playback.toggle-queue(); }
         }
-        if root.side-w >= 296px : IconButton {
-            commands: Icons.music;
+        if root.side-w >= root.roomy-from : IconButton {
+            icon: Icons.music;
             active: Playback.side-open;
             active-color: root.accent;
             clicked => { Playback.side-open = !Playback.side-open; }
         }
-        if root.side-w >= 296px : IconButton {
-            commands: Icons.mini;
+        if root.side-w >= root.roomy-from : IconButton {
+            icon: Icons.mini;
             clicked => { Playback.mini-player(); }
         }
         IconButton {
-            commands: Icons.lyrics;
+            icon: Icons.lyrics;
             active: Playback.expanded;
             active-color: root.accent;
             enabled: !root.idle;
@@ -603,7 +560,7 @@ export component NowPlayingBar inherits Rectangle {
             }
         }
         IconButton {
-            commands: Playback.volume <= 0.001 ? Icons.volume-mute : Playback.volume < 0.5 ? Icons.volume-low : Icons.volume-high;
+            icon: Playback.volume <= 0.001 ? Icons.volume-mute : Playback.volume < 0.5 ? Icons.volume-low : Icons.volume-high;
             clicked => {
                 if (Playback.volume > 0.001) {
                     root.saved-volume = Playback.volume;
@@ -615,8 +572,8 @@ export component NowPlayingBar inherits Rectangle {
             }
         }
         Scrubber {
-            width: Math.max(56px, Math.min(120px, root.side-w - 7 * 36px - 7 * Theme.space-xs));
-            y: 8px;
+            width: Math.max(root.volume-min, Math.min(root.volume-max, root.side-w - 7 * Tokens.control-md - 7 * Tokens.space-xs));
+            y: (parent.height - self.height) / 2;
             value: Playback.volume;
             fill-color: root.accent;
             live(v) => {

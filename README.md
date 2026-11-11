@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon-128.png" width="96" height="96" alt="Cadence icon"></p>
+
 # Cadence — Lightweight Spotify Client for Windows (Pure Rust)
 
 [![Release](https://img.shields.io/github/v/release/yoshik08/cadence)](https://github.com/yoshik08/cadence/releases)
@@ -138,3 +140,7 @@ Playback, release build, 10 min with the library open and a playlist playing (9 
 ## Legal
 
 librespot is an unofficial client library. Using it is against Spotify's Terms of Service, so use Cadence at your own risk. Cadence is not affiliated with or endorsed by Spotify.
+
+---
+
+Icon by [Icons8](https://icons8.com).

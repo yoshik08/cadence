@@ -1,0 +1,169 @@
+// Cadence design tokens: the only place colours, type sizes, spacing, radii, motion and shared
+// sizes are defined. Screens read `Tokens`; nothing outside this file holds a hex colour or a
+// duration. A size used by a single component is a named property at the top of that component
+// instead; only values shared across components live here.
+//
+// Two layers: `Primitive` is the raw palette (private to this file), `Tokens` gives each value a
+// role. Change a role here and every screen follows.
+import "../assets/fonts/Geist-400-700.ttf";
+
+global Primitive {
+    // Near-black neutrals, darkest first.
+    out property <color> ink-stage: #050507;
+    out property <color> ink-0: #0a0a0b;
+    out property <color> ink-1: #131315;
+    out property <color> ink-2: #1c1c1f;
+    out property <color> ink-3: #282828;
+    // White at fixed opacities: fills (6 to 16 %) and text (32 to 92 %).
+    out property <color> white: #ffffff;
+    out property <color> white-6: #ffffff0f;
+    out property <color> white-8: #ffffff14;
+    out property <color> white-12: #ffffff1f;
+    out property <color> white-16: #ffffff29;
+    out property <color> white-32: #ffffff52;
+    out property <color> white-48: #ffffff7a;
+    out property <color> white-65: #ffffffa6;
+    out property <color> white-92: #ffffffeb;
+    // Black at fixed opacities: shadows and the scrim behind dialogs.
+    out property <color> black: #000000;
+    out property <color> black-50: #00000080;
+    out property <color> black-63: #000000a0;
+    out property <color> black-72: #000000b8;
+    // Hues.
+    out property <color> periwinkle: #7f9bff;
+    out property <color> red: #ff4d4d;
+    out property <color> red-light: #ff6b6b;
+    out property <color> pink: #ff3d8b;
+    out property <color> clay: #d6906c;
+}
+
+export global Tokens {
+    // --- Colour: backgrounds ------------------------------------------------------------------
+    out property <color> bg-base: Primitive.ink-0;
+    out property <color> bg-surface: Primitive.ink-1;
+    out property <color> bg-elevated: Primitive.ink-2;
+    out property <color> bg-hover: Primitive.white-6;
+    out property <color> bg-pressed: Primitive.white-12;
+    // Unfilled part of sliders, progress bars and switches.
+    out property <color> bg-track: Primitive.white-16;
+    // Floating panels over content (overlay, lyrics controls).
+    out property <color> bg-overlay: #141416f2;
+    // The karaoke stage (matches the pre-rendered stage image made in Rust).
+    out property <color> bg-stage: Primitive.ink-stage;
+    // The near-white fill of the prominent controls (Play, primary buttons, selected chips).
+    out property <color> bg-inverse: Primitive.white-92;
+    out property <color> bg-inverse-hover: Primitive.white;
+    out property <color> bg-inverse-pressed: Primitive.white-65;
+    // Translucent controls over artwork (lyrics page pills).
+    out property <color> bg-glass: Primitive.white-8;
+    out property <color> bg-glass-hover: Primitive.white-16;
+    // Behind art that has never loaded. Cached art never shows it.
+    out property <color> art-placeholder: Primitive.ink-3;
+    out property <color> scrim: Primitive.black-63;
+    out property <color> shadow: Primitive.black-50;
+    out property <color> shadow-strong: Primitive.black-72;
+
+    // --- Colour: lines ------------------------------------------------------------------------
+    out property <color> border: Primitive.white-8;
+    out property <color> border-strong: Primitive.white-12;
+    out property <color> focus-ring: Primitive.white-65;
+
+    // --- Colour: text -------------------------------------------------------------------------
+    out property <color> text-primary: Primitive.white-92;
+    out property <color> text-secondary: Primitive.white-65;
+    out property <color> text-tertiary: Primitive.white-48;
+    out property <color> text-faint: Primitive.white-32;
+    out property <color> text-bright: Primitive.white;
+    out property <color> text-inverse: Primitive.ink-0;
+
+    // --- Colour: accent and status ------------------------------------------------------------
+    // The accent is only the default; now-playing overrides it per album.
+    out property <color> accent: Primitive.periwinkle;
+    out property <color> on-accent: Primitive.ink-0;
+    out property <color> danger: Primitive.red;
+    out property <color> danger-hover: Primitive.red-light;
+    out property <color> on-danger: Primitive.white;
+    // Karaoke defaults (the user can recolour them on the stage).
+    out property <color> karaoke-lyric: Primitive.white;
+    out property <color> karaoke-highlight: Primitive.pink;
+    out property <color> karaoke-secondary: Primitive.clay;
+    out property <color> black: Primitive.black;
+
+    // --- Type: one family, six sizes ----------------------------------------------------------
+    out property <string> font-family: "Geist";
+    // The lyrics page keeps the type of the site it was ported from.
+    out property <string> font-lyrics: "Bricolage Grotesque 36pt SemiCondensed";
+    out property <string> font-lyrics-ui: "Bricolage Grotesque";
+    out property <string> font-mono: "JetBrains Mono";
+    out property <length> size-micro: 10px;
+    out property <length> size-caption: 12px;
+    out property <length> size-body: 15px;
+    out property <length> size-heading: 20px;
+    out property <length> size-title: 36px;
+    out property <length> size-display: 48px;
+    out property <int> weight-regular: 400;
+    out property <int> weight-medium: 500;
+    out property <int> weight-semibold: 600;
+    out property <int> weight-bold: 700;
+    // Tracking tightens as size grows.
+    out property <length> tracking-caption: 0.2px;
+    out property <length> tracking-body: 0px;
+    out property <length> tracking-heading: -0.2px;
+    out property <length> tracking-title: -1.4px;
+    out property <length> tracking-display: -1.4px;
+
+    // --- Spacing, 4px base --------------------------------------------------------------------
+    // 2xs is the gap between the two lines of a row (title over subtitle); layout uses xs and up.
+    out property <length> space-2xs: 2px;
+    out property <length> space-xs: 4px;
+    out property <length> space-sm: 8px;
+    out property <length> space-md: 12px;
+    out property <length> space-lg: 16px;
+    out property <length> space-xl: 24px;
+    out property <length> space-2xl: 32px;
+
+    // --- Radii --------------------------------------------------------------------------------
+    out property <length> radius-sm: 4px;
+    out property <length> radius-md: 8px;
+    out property <length> radius-lg: 12px;
+    out property <length> radius-full: 999px;
+
+    // --- Motion: only on user action or arriving content --------------------------------------
+    out property <duration> duration-fast: 120ms;
+    out property <duration> duration-base: 200ms;
+    out property <duration> duration-slow: 320ms;
+    // ease-out for hover / enter, ease-in-out for things that move.
+    out property <easing> ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    out property <easing> ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+    // How far a page slides while it fades in.
+    out property <length> slide: 8px;
+
+    // --- Shared sizes -------------------------------------------------------------------------
+    out property <length> hairline: 1px;
+    out property <length> icon-xs: 12px;
+    out property <length> icon-sm: 16px;
+    out property <length> icon-md: 20px;
+    out property <length> icon-lg: 24px;
+    // Heights of buttons, fields and chips.
+    out property <length> control-sm: 32px;
+    out property <length> control-md: 36px;
+    out property <length> control-lg: 44px;
+    // Heights of list rows: one line, two lines, two lines with large art.
+    out property <length> row-sm: 36px;
+    out property <length> row-md: 52px;
+    out property <length> row-lg: 68px;
+    // Art: row thumbnail, card, page header.
+    out property <length> art-thumb: 56px;
+    out property <length> art-card: 160px;
+    out property <length> art-header: 176px;
+    // Slider and progress bar thickness.
+    out property <length> track-height: 4px;
+    out property <length> shadow-blur: 24px;
+    // Window frame.
+    out property <length> sidebar-width: 232px;
+    out property <length> panel-width: 340px;
+    out property <length> bar-height: 88px;
+    out property <length> page-margin: 32px;
+    // Disabled controls.
+    out property <float> disabled-opacity: 0.4;
+}

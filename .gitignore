@@ -2,3 +2,5 @@
 smoke*.png
 /dist
 /vendor/*/target
+/scripts/icons/target
+/scripts/icons/Cargo.lock

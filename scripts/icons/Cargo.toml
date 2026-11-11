@@ -1,0 +1,12 @@
+# Rebuilds the app icons from assets/icon-source.png. Run from the repo root:
+#   cargo run --release --manifest-path scripts/icons/Cargo.toml
+[package]
+name = "cadence-icons"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+png = "0.18.1"
+
+[workspace]

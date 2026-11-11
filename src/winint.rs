@@ -76,8 +76,7 @@ unsafe fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
         let mut nid = NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: 1, ..Default::default() };
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         nid.uCallbackMessage = WM_TRAY;
-        let inst = GetModuleHandleW(None).unwrap_or_default();
-        nid.hIcon = LoadIconW(Some(inst.into()), PCWSTR(1 as _)).unwrap_or_default();
+        nid.hIcon = crate::taskbar::icon_handle(GetSystemMetrics(SM_CXSMICON));
         let title = STATE.lock().ok().and_then(|s| s.as_ref().map(|s| s.title.clone())).unwrap_or_default();
         let tip = if title.is_empty() { "Cadence".to_string() } else { format!("Cadence · {title}") };
         wide(&tip, &mut nid.szTip);

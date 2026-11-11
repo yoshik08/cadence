@@ -207,6 +207,7 @@ fn card(c: &CardData) -> Card {
         round: c.round,
         pinned: false,
         local: c.kind == "local-folder" || c.kind == "local",
+        fresh: false,
     }
 }
 

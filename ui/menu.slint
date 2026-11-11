@@ -1,7 +1,8 @@
 // Context menu for tracks, albums, artists, playlists and episodes. src/menu.rs builds the items
 // for what was clicked and runs the chosen action. Keyboard: Up/Down, Enter, Escape; Left goes
 // back from a submenu.
-import { Theme } from "theme.slint";
+import { Tokens } from "tokens.slint";
+import { Label, Caption, ListRow, Card as Surface } from "base.slint";
 
 export struct MenuItem {
     label: string,
@@ -30,19 +31,16 @@ export global Menu {
     callback for-item(string, string, int, string, length, length);
 }
 
-component Label inherits Text {
-    font-family: Theme.font-family;
-    font-size: Theme.size-body;
-    color: Theme.text;
-    overflow: elide;
-    min-width: 0px;
-}
-
 export component MenuOverlay inherits Rectangle {
     property <length> item-h: 34px;
     property <length> menu-w: 248px;
-    property <length> pad: 6px;
-    property <length> menu-h: Math.min(root.height - 16px, (Menu.title != "" ? 30px : 0px) + Menu.items.length * root.item-h + 2 * root.pad + 2px);
+    property <length> pad: Tokens.space-xs;
+    property <length> title-h: Tokens.control-sm;
+    // The menu keeps this distance from the window edge.
+    property <length> margin: Tokens.space-sm;
+    property <length> menu-h: Math.min(root.height - 2 * root.margin, (Menu.title != "" ? root.title-h : 0px) + Menu.items.length * root.item-h + 2 * root.pad + 2 * Tokens.hairline);
+    // The toast floats above the bottom bar.
+    property <length> toast-lift: 56px;
 
     if Menu.open : Rectangle {
         // Outside click closes.
@@ -79,18 +77,11 @@ export component MenuOverlay inherits Rectangle {
                 return accept;
             }
         }
-        Rectangle {
-            x: Math.max(8px, Math.min(Menu.at-x, root.width - root.menu-w - 8px));
-            y: Math.max(8px, Math.min(Menu.at-y, root.height - root.menu-h - 8px));
+        Surface {
+            x: Math.max(root.margin, Math.min(Menu.at-x, root.width - root.menu-w - root.margin));
+            y: Math.max(root.margin, Math.min(Menu.at-y, root.height - root.menu-h - root.margin));
             width: root.menu-w;
             height: root.menu-h;
-            border-radius: Theme.radius-control + 2px;
-            background: Theme.surface-raised;
-            border-width: 1px;
-            border-color: Theme.divider;
-            drop-shadow-blur: 24px;
-            drop-shadow-offset-y: 8px;
-            drop-shadow-color: #000000b0;
             clip: true;
             // Swallow clicks on the menu itself.
             TouchArea { }
@@ -98,45 +89,45 @@ export component MenuOverlay inherits Rectangle {
                 padding: root.pad;
                 spacing: 0;
                 if Menu.title != "" : HorizontalLayout {
-                    height: 30px;
-                    padding-left: Theme.space-sm;
-                    Label {
+                    height: root.title-h;
+                    padding-left: Tokens.space-sm;
+                    Caption {
                         text: "‹  " + Menu.title;
-                        font-size: Theme.size-caption;
-                        font-weight: Theme.weight-semibold;
-                        color: Theme.text-tertiary;
+                        font-weight: Tokens.weight-semibold;
+                        color: back-ta.has-hover ? Tokens.text-secondary : Tokens.text-tertiary;
                         vertical-alignment: center;
+                        animate color { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
                     }
-                    TouchArea { clicked => { Menu.back(); } }
+                    back-ta := TouchArea { clicked => { Menu.back(); } }
                 }
                 Flickable {
                     content-height: Menu.items.length * root.item-h;
-                    for it[i] in Menu.items : Rectangle {
+                    for it[i] in Menu.items : ListRow {
                         y: i * root.item-h;
                         height: root.item-h;
-                        border-radius: Theme.radius-small;
-                        background: it.enabled && (Menu.hot == i || ta.has-hover) ? Theme.hover : transparent;
+                        hovered: it.enabled && (Menu.hot == i || ta.has-hover);
+                        pressed: it.enabled && ta.pressed;
                         if it.separator : Rectangle {
                             y: 0;
-                            height: 1px;
-                            x: Theme.space-sm;
-                            width: parent.width - 2 * Theme.space-sm;
-                            background: Theme.divider;
+                            height: Tokens.hairline;
+                            x: Tokens.space-sm;
+                            width: parent.width - 2 * Tokens.space-sm;
+                            background: Tokens.border;
                         }
                         Label {
-                            x: Theme.space-md;
-                            width: parent.width - 2 * Theme.space-md - (it.sub ? 16px : 0px);
+                            x: Tokens.space-md;
+                            width: parent.width - 2 * Tokens.space-md - (it.sub ? Tokens.space-lg : 0px);
                             height: parent.height;
                             vertical-alignment: center;
                             text: it.label;
-                            color: it.enabled ? Theme.text : Theme.text-tertiary;
+                            color: it.enabled ? Tokens.text-primary : Tokens.text-tertiary;
                         }
                         if it.sub : Label {
-                            x: parent.width - Theme.space-md - 10px;
+                            x: parent.width - Tokens.space-xl;
                             height: parent.height;
                             vertical-alignment: center;
                             text: "›";
-                            color: Theme.text-secondary;
+                            color: Tokens.text-secondary;
                         }
                         ta := TouchArea {
                             enabled: it.enabled;
@@ -151,18 +142,18 @@ export component MenuOverlay inherits Rectangle {
 
     if Menu.toast != "" : Rectangle {
         x: (root.width - self.width) / 2;
-        y: root.height - 88px - 56px;
-        width: toast-text.preferred-width + 2 * Theme.space-lg;
-        height: 36px;
-        border-radius: Theme.radius-pill;
-        background: #ffffffeb;
+        y: root.height - Tokens.bar-height - root.toast-lift;
+        width: toast-text.preferred-width + 2 * Tokens.space-lg;
+        height: Tokens.control-md;
+        border-radius: Tokens.radius-full;
+        background: Tokens.bg-inverse;
         toast-text := Label {
-            x: Theme.space-lg;
+            x: Tokens.space-lg;
             height: parent.height;
             vertical-alignment: center;
             text: Menu.toast;
-            color: Theme.bg;
-            font-weight: Theme.weight-medium;
+            color: Tokens.text-inverse;
+            font-weight: Tokens.weight-medium;
         }
     }
 }

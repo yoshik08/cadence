@@ -32,7 +32,7 @@ fn icon_file() -> Option<String> {
     let dir = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("cadence");
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join("cadence.ico");
-    let data: &[u8] = include_bytes!("../assets/icon.ico");
+    let data: &[u8] = include_bytes!("../assets/cadence.ico");
     if std::fs::read(&path).ok().as_deref() != Some(data) {
         std::fs::write(&path, data).ok()?;
     }
@@ -122,8 +122,34 @@ fn prop_str(s: &str) -> PROPVARIANT {
     }
 }
 
+/// The exe's icon resource at exactly `px` pixels (the .ico entry made for that size; a single
+/// image stretched by Windows is what makes small icons blurry).
+pub fn icon_handle(px: i32) -> windows::Win32::UI::WindowsAndMessaging::HICON {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{HICON, IMAGE_ICON, LR_SHARED, LoadImageW};
+    unsafe {
+        let inst = GetModuleHandleW(None).unwrap_or_default();
+        LoadImageW(Some(inst.into()), PCWSTR(1 as _), IMAGE_ICON, px, px, LR_SHARED).map_or(HICON::default(), |h| HICON(h.0))
+    }
+}
+
+/// Title bar / Alt+Tab / taskbar icons of a window, each at the size Windows asks for.
+pub fn set_window_icons(hwnd: isize) {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, ICON_BIG, ICON_SMALL, SM_CXICON, SM_CXSMICON, SendMessageW, WM_SETICON};
+    unsafe {
+        for (which, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
+            let icon = icon_handle(GetSystemMetrics(metric));
+            if !icon.is_invalid() {
+                SendMessageW(HWND(hwnd as *mut _), WM_SETICON, Some(WPARAM(which as usize)), Some(LPARAM(icon.0 as isize)));
+            }
+        }
+    }
+}
+
 /// Tags the main window (call once the HWND exists).
 pub fn set_window_identity(hwnd: isize) {
+    set_window_icons(hwnd);
     let exe = exe();
     let props: [(PROPERTYKEY, String); 4] = [
         (PKEY_AppUserModel_ID, APP_ID.to_string()),

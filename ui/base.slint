@@ -1,0 +1,257 @@
+// Shared base components. Every screen builds on these instead of keeping its own copies, so
+// hover, press, focus and disabled look and move the same everywhere:
+//
+//   Label, Caption   text in the two body sizes
+//   Glyph            a 24-grid icon path
+//   ListRow          the shell of any row: hover / pressed / selected / focused / disabled
+//   Button           primary | secondary | ghost | danger
+//   IconButton       square or round, optional toggled state
+//   Card             a raised surface (menus, dialogs, overlays)
+//   SectionHeader    a section title with an optional action link
+//
+// Feedback timing is one value (Tokens.duration-fast, ease-out) for all of them.
+// Keyboard focus is opt-in (`focusable`), so adopting a component never changes how a screen
+// reacts to Tab or Enter.
+import { Tokens } from "tokens.slint";
+
+export component Label inherits Text {
+    font-family: Tokens.font-family;
+    font-size: Tokens.size-body;
+    font-weight: Tokens.weight-regular;
+    color: Tokens.text-primary;
+    overflow: elide;
+    min-width: 0px;
+}
+
+export component Caption inherits Label {
+    font-size: Tokens.size-caption;
+    letter-spacing: Tokens.tracking-caption;
+    color: Tokens.text-secondary;
+}
+
+export component Glyph inherits Path {
+    in property <color> tint: Tokens.text-secondary;
+    in property <length> size: Tokens.icon-md;
+    in property <bool> solid;
+    // Icons are drawn on a 24 grid; strokes scale with the icon.
+    property <length> grid: 24px;
+    property <length> stroke-outline: 1.75px;
+    property <length> stroke-solid: 0.6px;
+    width: root.size;
+    height: root.size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: root.solid ? root.tint : transparent;
+    stroke: root.tint;
+    stroke-width: (root.solid ? root.stroke-solid : root.stroke-outline) * root.size / root.grid;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    animate fill, stroke { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+}
+
+// The background of a row. It only draws: the row keeps its own TouchArea and passes the state in.
+export component ListRow inherits Rectangle {
+    in property <bool> hovered;
+    in property <bool> pressed;
+    in property <bool> selected;
+    in property <bool> focused;
+    in property <bool> enabled: true;
+    border-radius: Tokens.radius-md;
+    border-width: root.focused ? Tokens.hairline : 0px;
+    border-color: Tokens.focus-ring;
+    opacity: root.enabled ? 1 : Tokens.disabled-opacity;
+    background: !root.enabled ? transparent
+        : root.pressed ? Tokens.bg-pressed
+        : root.selected ? Tokens.bg-elevated
+        : root.hovered ? Tokens.bg-hover
+        : transparent;
+    animate background { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+    @children
+}
+
+export component Button inherits Rectangle {
+    in property <string> text;
+    // "primary" | "secondary" | "ghost" | "danger"
+    in property <string> kind: "secondary";
+    in property <length> size: Tokens.control-lg;
+    in property <bool> enabled: true;
+    // Secondary only: shown as switched on.
+    in property <bool> active;
+    in property <bool> focusable;
+    out property <bool> has-hover: touch.has-hover;
+    out property <bool> has-focus: scope.has-focus;
+    callback clicked();
+
+    property <bool> filled: root.kind == "primary" || root.kind == "danger";
+    // Filled buttons keep a readable minimum width; the others shrink to a square.
+    property <length> filled-min-width: 96px;
+    property <bool> hot: touch.has-hover && root.enabled;
+    property <bool> down: touch.pressed && root.enabled;
+
+    width: max(root.filled ? root.filled-min-width : root.size, label.preferred-width + 2 * Tokens.space-lg);
+    height: root.size;
+    border-radius: Tokens.radius-md;
+    opacity: root.enabled ? 1 : Tokens.disabled-opacity;
+    border-width: scope.has-focus || (root.active && !root.filled) ? Tokens.hairline : 0px;
+    border-color: scope.has-focus ? Tokens.focus-ring : Tokens.text-tertiary;
+    background: root.kind == "primary" ? (root.down ? Tokens.bg-inverse-pressed : root.hot ? Tokens.bg-inverse-hover : Tokens.bg-inverse)
+        : root.kind == "danger" ? (root.hot ? Tokens.danger-hover : Tokens.danger)
+        : root.kind == "ghost" ? (root.down ? Tokens.bg-pressed : root.hot ? Tokens.bg-hover : transparent)
+        : (root.down ? Tokens.bg-pressed : root.hot || root.active ? Tokens.bg-elevated : Tokens.bg-surface);
+    animate background { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+
+    label := Label {
+        width: parent.width;
+        height: parent.height;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        text: root.text;
+        font-weight: Tokens.weight-semibold;
+        color: root.kind == "primary" ? Tokens.text-inverse : root.kind == "danger" ? Tokens.on-danger : Tokens.text-primary;
+    }
+    scope := FocusScope {
+        enabled: root.focusable && root.enabled;
+        key-pressed(e) => {
+            if (e.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <length> size: Tokens.control-md;
+    in property <length> icon-size: Tokens.icon-md;
+    in property <bool> solid;
+    in property <bool> round;
+    in property <color> tint: Tokens.text-secondary;
+    // Toggled on: the icon takes `active-color` and gets a dot, so state is not colour alone.
+    in property <bool> active;
+    in property <color> active-color: Tokens.accent;
+    in property <bool> enabled: true;
+    in property <bool> focusable;
+    out property <bool> has-hover: touch.has-hover;
+    out property <bool> has-focus: scope.has-focus;
+    callback clicked();
+    // The same click with its position in window coordinates (to anchor a menu).
+    callback clicked-at(length, length);
+
+    property <bool> hot: touch.has-hover && root.enabled;
+    property <length> dot-size: Tokens.track-height;
+    // The default quiet tint brightens on hover; a caller's own tint is left alone.
+    property <color> ink: root.active ? root.active-color
+        : (root.hot && root.tint == Tokens.text-secondary) ? Tokens.text-primary
+        : root.tint;
+
+    width: root.size;
+    height: root.size;
+    border-radius: root.round ? Tokens.radius-full : Tokens.radius-md;
+    opacity: root.enabled ? 1 : Tokens.disabled-opacity;
+    border-width: scope.has-focus ? Tokens.hairline : 0px;
+    border-color: Tokens.focus-ring;
+    background: !root.enabled ? transparent : touch.pressed ? Tokens.bg-pressed : touch.has-hover ? Tokens.bg-hover : transparent;
+    animate background { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+
+    Glyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        size: root.icon-size;
+        solid: root.solid;
+        commands: root.icon;
+        tint: root.ink;
+    }
+    Rectangle {
+        visible: root.active;
+        width: root.dot-size;
+        height: root.dot-size;
+        border-radius: Tokens.radius-full;
+        background: root.active-color;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height + root.icon-size) / 2 + Tokens.space-2xs;
+    }
+    scope := FocusScope {
+        enabled: root.focusable && root.enabled;
+        key-pressed(e) => {
+            if (e.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                root.clicked();
+                root.clicked-at(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+}
+
+// A raised surface. Interactive cards pass their pointer state in, like ListRow.
+export component Card inherits Rectangle {
+    in property <bool> raised: true;
+    in property <bool> outlined: true;
+    in property <bool> hovered;
+    in property <bool> pressed;
+    in property <bool> focused;
+    in property <bool> enabled: true;
+    border-radius: Tokens.radius-lg;
+    border-width: root.focused || root.outlined ? Tokens.hairline : 0px;
+    border-color: root.focused ? Tokens.focus-ring : Tokens.border;
+    opacity: root.enabled ? 1 : Tokens.disabled-opacity;
+    background: root.pressed ? Tokens.bg-surface : Tokens.bg-elevated;
+    drop-shadow-blur: root.raised ? (root.hovered ? Tokens.shadow-blur + Tokens.space-sm : Tokens.shadow-blur) : 0px;
+    drop-shadow-offset-y: root.raised ? Tokens.space-sm : 0px;
+    drop-shadow-color: Tokens.shadow-strong;
+    animate background { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+    @children
+}
+
+export component SectionHeader inherits HorizontalLayout {
+    in property <string> title;
+    // Non-empty: a link on the right ("Show all").
+    in property <string> action;
+    in property <bool> enabled: true;
+    in property <length> inset: Tokens.page-margin;
+    callback action-clicked();
+    padding-left: root.inset;
+    padding-right: root.inset;
+    height: Tokens.control-sm;
+    Label {
+        text: root.title;
+        font-size: Tokens.size-heading;
+        font-weight: Tokens.weight-semibold;
+        letter-spacing: Tokens.tracking-heading;
+        vertical-alignment: center;
+    }
+    if root.action != "" : Rectangle {
+        width: link.preferred-width;
+        opacity: root.enabled ? 1 : Tokens.disabled-opacity;
+        link := Caption {
+            height: parent.height;
+            vertical-alignment: center;
+            text: root.action;
+            font-weight: Tokens.weight-semibold;
+            color: touch.pressed ? Tokens.text-tertiary : touch.has-hover || scope.has-focus ? Tokens.text-primary : Tokens.text-secondary;
+            animate color { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+        }
+        scope := FocusScope {
+            enabled: false;
+            touch := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.action-clicked(); }
+            }
+        }
+    }
+}

@@ -1,8 +1,15 @@
-// Album art with rounded corners. Slint's software renderer ignores both Image border-radius and
-// the radius of a clipping Rectangle, so the corners are cut by painting four small shapes in the
-// colour behind the art. `backdrop` is that colour (`backdrop-bottom` too, if it is a vertical
-// gradient behind the art). Without an image it shows a plain rounded surface.
-import { Theme } from "theme.slint";
+// Art with rounded corners. Every cover, artist photo and playlist image goes through this.
+//
+// - No image yet: a plain rounded tile in `placeholder`.
+// - The image arrives: it fades in (`fade: false` shows it at once, for art that was cached).
+// - The image is replaced (a small copy swapped for the sharp one, or the next track): the new one
+//   fades in over the old one, which stays fully visible underneath, so the placeholder never
+//   flashes through.
+//
+// Slint's software renderer ignores both Image border-radius and the radius of a clipping
+// Rectangle, so the corners are cut by painting four small shapes in the colour behind the art.
+// `backdrop` is that colour (`backdrop-bottom` too, if it is a vertical gradient behind the art).
+import { Tokens } from "tokens.slint";
 
 component Corner inherits Path {
     in property <length> r;
@@ -12,23 +19,63 @@ component Corner inherits Path {
     viewbox-height: 1;
 }
 
+component Layer inherits Image {
+    in property <bool> front;
+    in property <bool> fade;
+    width: 100%;
+    height: 100%;
+    image-fit: cover;
+    image-rendering: smooth;
+    z: root.front ? 1 : 0;
+    opacity: 0;
+    states [
+        front when root.front: {
+            opacity: 1;
+            // Coming to the front: fade in. Going to the back: stay opaque until the new front
+            // has finished fading in, then drop out.
+            in {
+                animate opacity { duration: root.fade ? Tokens.duration-base : 0ms; easing: Tokens.ease-out; }
+            }
+            out {
+                animate opacity { delay: Tokens.duration-base; duration: 0ms; }
+            }
+        }
+    ]
+}
+
+// Two image layers that take turns being in front, so a replaced image fades in over the old one.
+export component Crossfade inherits Rectangle {
+    in property <image> source;
+    in property <bool> fade: true;
+    property <image> first;
+    property <image> second;
+    property <bool> first-front: true;
+    init => { root.first = root.source; }
+    changed source => {
+        if (root.first-front) {
+            root.second = root.source;
+        } else {
+            root.first = root.source;
+        }
+        root.first-front = !root.first-front;
+    }
+    Layer { source: root.first; front: root.first-front; fade: root.fade; }
+    Layer { source: root.second; front: !root.first-front; fade: root.fade; }
+}
+
 export component Cover inherits Rectangle {
     in property <image> source;
-    in property <length> radius: Theme.radius-thumb;
-    in property <color> backdrop: Theme.bg;
+    in property <length> radius: Tokens.radius-md;
+    in property <color> backdrop: Tokens.bg-base;
     in property <color> backdrop-bottom: backdrop;
-    property <bool> has-art: root.source.width > 0;
+    in property <color> placeholder: Tokens.art-placeholder;
+    in property <bool> fade: true;
+    out property <bool> has-art: root.source.width > 0;
 
-    background: Theme.surface;
+    background: root.placeholder;
     border-radius: root.radius;
 
-    Image {
-        source: root.source;
-        width: 100%;
-        height: 100%;
-        image-fit: cover;
-        visible: root.has-art;
-    }
+    Crossfade { source: root.source; fade: root.fade; }
 
     Corner { x: 0; y: 0; r: root.radius; visible: root.has-art; fill: root.backdrop; commands: "M0 0 L1 0 A1 1 0 0 0 0 1 Z"; }
     Corner { x: root.width - self.width; y: 0; r: root.radius; visible: root.has-art; fill: root.backdrop; commands: "M1 0 L0 0 A1 1 0 0 1 1 1 Z"; }
