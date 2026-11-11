@@ -47,7 +47,7 @@ export component NowPlayingPanel inherits Rectangle {
             if Playback.lyr-plain.length > 0 && Playback.lyr-synced : HorizontalLayout {
                 spacing: Tokens.space-2xs;
                 Button { size: Tokens.control-sm; text: "−0.1s"; clicked => { Playback.lyrics-offset(-100); } }
-                Caption { width: root.offset-label; text: Playback.lyr-offset == 0 ? "in sync" : (Playback.lyr-offset > 0 ? "+" : "") + Playback.lyr-offset / 1000 + "s"; horizontal-alignment: center; vertical-alignment: center; }
+                Caption { width: root.offset-label; text: Playback.lyr-offset == 0 ? "" : (Playback.lyr-offset > 0 ? "+" : "") + Playback.lyr-offset / 1000 + "s"; horizontal-alignment: center; vertical-alignment: center; }
                 Button { size: Tokens.control-sm; text: "+0.1s"; clicked => { Playback.lyrics-offset(100); } }
             }
         }

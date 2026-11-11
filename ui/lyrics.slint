@@ -630,7 +630,7 @@ export component LyricsOverlay inherits Rectangle {
             OffsetButton { label: "−0.1s"; clicked => { Playback.lyrics-offset(-100); } }
             Text {
                 width: root.offset-label;
-                text: Playback.lyr-offset == 0 ? "lyrics in sync" : (Playback.lyr-offset > 0 ? "+" : "") + Playback.lyr-offset / 1000 + "s";
+                text: Playback.lyr-offset == 0 ? "" : (Playback.lyr-offset > 0 ? "+" : "") + Playback.lyr-offset / 1000 + "s";
                 color: Tokens.text-tertiary;
                 font-size: Tokens.size-caption;
                 horizontal-alignment: center;
