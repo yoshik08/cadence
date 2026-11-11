@@ -1,0 +1,168 @@
+// Context menu for tracks, albums, artists, playlists and episodes. src/menu.rs builds the items
+// for what was clicked and runs the chosen action. Keyboard: Up/Down, Enter, Escape; Left goes
+// back from a submenu.
+import { Theme } from "theme.slint";
+
+export struct MenuItem {
+    label: string,
+    action: string,
+    enabled: bool,
+    // A line above this item.
+    separator: bool,
+    // Opens a submenu (shows a chevron).
+    sub: bool,
+}
+
+export global Menu {
+    in property <bool> open;
+    in property <[MenuItem]> items;
+    in property <string> title;
+    // Click position in window coordinates; the overlay keeps the menu inside the window.
+    in property <length> at-x;
+    in property <length> at-y;
+    in-out property <int> hot: -1;
+    // A short confirmation after an action ("Link copied"); empty hides it.
+    in property <string> toast;
+    callback pick(string);
+    callback close();
+    callback back();
+    // Requests from rows: (uri, context uri, index in context, queue uid, x, y).
+    callback for-item(string, string, int, string, length, length);
+}
+
+component Label inherits Text {
+    font-family: Theme.font-family;
+    font-size: Theme.size-body;
+    color: Theme.text;
+    overflow: elide;
+    min-width: 0px;
+}
+
+export component MenuOverlay inherits Rectangle {
+    property <length> item-h: 34px;
+    property <length> menu-w: 248px;
+    property <length> pad: 6px;
+    property <length> menu-h: Math.min(root.height - 16px, (Menu.title != "" ? 30px : 0px) + Menu.items.length * root.item-h + 2 * root.pad + 2px);
+
+    if Menu.open : Rectangle {
+        // Outside click closes.
+        TouchArea {
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down) {
+                    Menu.close();
+                }
+            }
+        }
+        keys := FocusScope {
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    Menu.close();
+                    return accept;
+                }
+                if (event.text == Key.DownArrow) {
+                    Menu.hot = Math.mod(Menu.hot + 1, Menu.items.length);
+                    return accept;
+                }
+                if (event.text == Key.UpArrow) {
+                    Menu.hot = Menu.hot <= 0 ? Menu.items.length - 1 : Menu.hot - 1;
+                    return accept;
+                }
+                if (event.text == Key.LeftArrow && Menu.title != "") {
+                    Menu.back();
+                    return accept;
+                }
+                if ((event.text == Key.Return || event.text == " " || event.text == Key.RightArrow) && Menu.hot >= 0 && Menu.items[Menu.hot].enabled) {
+                    Menu.pick(Menu.items[Menu.hot].action);
+                    return accept;
+                }
+                return accept;
+            }
+        }
+        Rectangle {
+            x: Math.max(8px, Math.min(Menu.at-x, root.width - root.menu-w - 8px));
+            y: Math.max(8px, Math.min(Menu.at-y, root.height - root.menu-h - 8px));
+            width: root.menu-w;
+            height: root.menu-h;
+            border-radius: Theme.radius-control + 2px;
+            background: Theme.surface-raised;
+            border-width: 1px;
+            border-color: Theme.divider;
+            drop-shadow-blur: 24px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: #000000b0;
+            clip: true;
+            // Swallow clicks on the menu itself.
+            TouchArea { }
+            VerticalLayout {
+                padding: root.pad;
+                spacing: 0;
+                if Menu.title != "" : HorizontalLayout {
+                    height: 30px;
+                    padding-left: Theme.space-sm;
+                    Label {
+                        text: "‹  " + Menu.title;
+                        font-size: Theme.size-caption;
+                        font-weight: Theme.weight-semibold;
+                        color: Theme.text-tertiary;
+                        vertical-alignment: center;
+                    }
+                    TouchArea { clicked => { Menu.back(); } }
+                }
+                Flickable {
+                    content-height: Menu.items.length * root.item-h;
+                    for it[i] in Menu.items : Rectangle {
+                        y: i * root.item-h;
+                        height: root.item-h;
+                        border-radius: Theme.radius-small;
+                        background: it.enabled && (Menu.hot == i || ta.has-hover) ? Theme.hover : transparent;
+                        if it.separator : Rectangle {
+                            y: 0;
+                            height: 1px;
+                            x: Theme.space-sm;
+                            width: parent.width - 2 * Theme.space-sm;
+                            background: Theme.divider;
+                        }
+                        Label {
+                            x: Theme.space-md;
+                            width: parent.width - 2 * Theme.space-md - (it.sub ? 16px : 0px);
+                            height: parent.height;
+                            vertical-alignment: center;
+                            text: it.label;
+                            color: it.enabled ? Theme.text : Theme.text-tertiary;
+                        }
+                        if it.sub : Label {
+                            x: parent.width - Theme.space-md - 10px;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            text: "›";
+                            color: Theme.text-secondary;
+                        }
+                        ta := TouchArea {
+                            enabled: it.enabled;
+                            moved => { Menu.hot = i; }
+                            clicked => { Menu.pick(it.action); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if Menu.toast != "" : Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - 88px - 56px;
+        width: toast-text.preferred-width + 2 * Theme.space-lg;
+        height: 36px;
+        border-radius: Theme.radius-pill;
+        background: #ffffffeb;
+        toast-text := Label {
+            x: Theme.space-lg;
+            height: parent.height;
+            vertical-alignment: center;
+            text: Menu.toast;
+            color: Theme.bg;
+            font-weight: Theme.weight-medium;
+        }
+    }
+}

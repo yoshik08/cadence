@@ -1,5 +1,5 @@
 //! Two sign-ins, both PKCE with a loopback redirect:
-//! 1. Web API (rspotify) with the user's own client ID, redirect `127.0.0.1:8888/callback`.
+//! 1. Web API (`web.rs`) with the user's own client ID, redirect `127.0.0.1:8888/callback`.
 //! 2. Streaming (librespot) with librespot's own desktop client ID, redirect `127.0.0.1:8898/login`,
 //!    done once; afterwards librespot's `Cache` holds reusable credentials.
 
@@ -7,21 +7,11 @@
 
 use librespot_core::{authentication::Credentials, cache::Cache};
 use librespot_oauth::OAuthClientBuilder;
-use rspotify::{AuthCodePkceSpotify, Config, Credentials as WebCreds, OAuth, prelude::*, scopes};
 use std::{
     path::PathBuf,
     process::Command,
     time::Duration,
 };
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream},
-};
-
-const WEB_ADDR: &str = "127.0.0.1:8888";
-const WEB_REDIRECT: &str = "http://127.0.0.1:8888/callback";
-const WEB_SCOPES: &str = "playlist-read-private playlist-read-collaborative user-library-read \
-                          user-read-recently-played user-read-private";
 
 // librespot-core 0.8.0 config.rs `KEYMASTER_CLIENT_ID` (pub(crate), default `SessionConfig` client ID on Windows).
 const STREAM_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
@@ -85,58 +75,16 @@ pub fn client_id() -> Option<String> {
         })
 }
 
-/// Web API client: cached token (refreshed when expired), else browser sign-in on port 8888.
-/// The returned client keeps refreshing its token (and rewriting the cache) on every request.
-pub async fn web_api(client_id: &str) -> Result<AuthCodePkceSpotify, String> {
-    let oauth = OAuth {
-        redirect_uri: WEB_REDIRECT.to_owned(),
-        scopes: scopes!(WEB_SCOPES),
-        ..Default::default()
-    };
-    let config = Config {
-        token_cached: true,
-        token_refreshing: true,
-        cache_path: data_dir().join("web_token.json"),
-        ..Default::default()
-    };
-    let mut spotify = AuthCodePkceSpotify::with_config(WebCreds::new_pkce(client_id), oauth, config);
-
-    // Missing/corrupt cache or a cache missing a scope all come back as None/Err: just sign in again.
-    if let Ok(Some(token)) = spotify.read_token_cache(true).await {
-        let expired = token.is_expired();
-        *spotify.token.lock().await.unwrap() = Some(token);
-        if !expired {
-            return Ok(spotify);
-        }
-        match spotify.refresh_token().await {
-            // `refresh_token` also rewrites the cache file.
-            Ok(()) if spotify.token.lock().await.unwrap().is_some() => return Ok(spotify),
-            Ok(()) => eprintln!("auth: cached token has no refresh token, signing in again"),
-            Err(e) => eprintln!("auth: token refresh failed ({e}), signing in again"),
-        }
-    }
-
-    let url = spotify.get_authorize_url(None).map_err(|e| e.to_string())?;
-    // Bind before opening the browser so the redirect cannot arrive early.
-    let listener = TcpListener::bind(WEB_ADDR)
-        .await
-        .map_err(|e| format!("cannot listen on {WEB_ADDR}: {e}"))?;
-    open_browser(&url)?;
-    let code = tokio::time::timeout(LOGIN_TIMEOUT, wait_for_code(&listener, &spotify))
-        .await
-        .map_err(|_| "Spotify sign-in timed out after 5 minutes".to_owned())??;
-    // Exchanges the code, stores the token and writes `web_token.json`.
-    spotify.request_token(&code).await.map_err(|e| format!("token exchange: {e}"))?;
-    Ok(spotify)
-}
-
 /// librespot cache: credentials and volume under `data_dir()/librespot`; audio under
 /// `%LOCALAPPDATA%\cadence\cache\audio`, capped at 1 GiB (librespot prunes the oldest files).
 /// A track played once is never downloaded again while it stays in the cache.
 pub fn librespot_cache() -> Cache {
     let dir = data_dir().join("librespot");
     let audio = crate::cache::dir("audio");
-    Cache::new(Some(dir.clone()), Some(dir), Some(audio), Some(1 << 30)).unwrap_or_else(|e| {
+    // Settings > Storage: 0 = 0.5 GB, else whole GB.
+    let gb = crate::prefs::u64_or("cache_gb", 1);
+    let limit = if gb == 0 { 512 << 20 } else { gb << 30 };
+    Cache::new(Some(dir.clone()), Some(dir), Some(audio), Some(limit)).unwrap_or_else(|e| {
         eprintln!("auth: librespot cache disabled: {e}");
         Cache::new(None::<PathBuf>, None, None, None).expect("cache without paths cannot fail")
     })
@@ -171,7 +119,7 @@ pub async fn streaming_credentials(cache: &Cache) -> Result<Credentials, String>
     Ok(Credentials::with_access_token(token))
 }
 
-fn open_browser(url: &str) -> Result<(), String> {
+pub fn open_browser(url: &str) -> Result<(), String> {
     // `cmd /c start` would cut the URL at `&`; rundll32 gets it as one argument.
     Command::new("rundll32")
         .args(["url.dll,FileProtocolHandler", url])
@@ -180,53 +128,7 @@ fn open_browser(url: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot open the browser ({e}); open this URL manually: {url}"))
 }
 
-/// Accepts connections until one is the OAuth redirect; returns its (state-checked) `code`.
-async fn wait_for_code(listener: &TcpListener, spotify: &AuthCodePkceSpotify) -> Result<String, String> {
-    loop {
-        let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
-        let Some(target) = request_target(&mut stream).await else { continue };
-        if !target.starts_with("/callback") {
-            respond(&mut stream, "404 Not Found", "").await;
-            continue;
-        }
-        let result = if target.contains("error=") {
-            Err("Spotify sign-in was declined".to_owned())
-        } else {
-            spotify
-                .parse_response_code(&format!("http://{WEB_ADDR}{target}"))
-                .ok_or_else(|| "sign-in redirect had no code or a wrong state".to_owned())
-        };
-        let msg = if result.is_ok() {
-            "Signed in to Cadence. You can close this tab."
-        } else {
-            "Sign-in failed. Close this tab and try again from Cadence."
-        };
-        respond(&mut stream, "200 OK", &page(msg)).await;
-        return result;
-    }
-}
-
-/// Path+query from the request line (`GET <target> HTTP/1.1`); `None` on an idle or broken connection.
-async fn request_target(stream: &mut TcpStream) -> Option<String> {
-    // Browsers sometimes open speculative connections that never send anything.
-    let mut line = String::new();
-    let mut reader = BufReader::new(stream.take(8192));
-    match tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await {
-        Ok(Ok(n)) if n > 0 => line.split_whitespace().nth(1).map(str::to_owned),
-        _ => None,
-    }
-}
-
-async fn respond(stream: &mut TcpStream, status: &str, body: &str) {
-    let msg = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(msg.as_bytes()).await;
-    let _ = stream.shutdown().await;
-}
-
-fn page(msg: &str) -> String {
+pub fn page(msg: &str) -> String {
     format!(
         "<!doctype html><meta charset=utf-8><title>Cadence</title>\
          <style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#000;\

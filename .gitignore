@@ -1,3 +1,4 @@
 /target
 smoke*.png
 /dist
+/vendor/*/target

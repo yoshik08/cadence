@@ -1,7 +1,13 @@
 import { Theme } from "theme.slint";
-import { Browse, Sidebar, BrowseArea } from "browse.slint";
+import { Browse, Sidebar, BrowseArea, Card, TrackRow, ShelfData, SideItem, StatRow } from "browse.slint";
 import { Playback, NowPlayingBar, LyrLine, LyrRow, LyrWord, LyrLetter, KWord, KMotion } from "now_playing.slint";
 import { LyricsOverlay } from "lyrics.slint";
+import { Queue, QueueRow, QueuePanel } from "queue.slint";
+import { Menu, MenuItem, MenuOverlay } from "menu.slint";
+import { Dialog, DialogOverlay } from "dialog.slint";
+import { Settings, SettingsPage, DeviceRow } from "settings.slint";
+import { NowPlayingPanel } from "side.slint";
+import { MiniWindow, OsdWindow } from "mini.slint";
 // The lyrics page type (yoshik.xyz uses Bricolage Grotesque; these are static instances of it).
 import "../assets/fonts/Bricolage-500.ttf";
 import "../assets/fonts/Bricolage-600.ttf";
@@ -9,7 +15,10 @@ import "../assets/fonts/Bricolage-SemiCondensed-700.ttf";
 import "../assets/fonts/Bricolage-SemiCondensed-800.ttf";
 import "../assets/fonts/JetBrainsMono-500.ttf";
 
-export { Browse, Playback, LyrLine, LyrRow, LyrWord, LyrLetter, KWord, KMotion }
+export {
+    Menu, MenuItem, Queue, QueueRow, Browse, Card, TrackRow, ShelfData, SideItem, StatRow, Playback,
+    LyrLine, LyrRow, LyrWord, LyrLetter, KWord, KMotion, Dialog, Settings, DeviceRow, MiniWindow, OsdWindow
+}
 
 export component MainWindow inherits Window {
     title: "Cadence";
@@ -24,16 +33,28 @@ export component MainWindow inherits Window {
 
     callback play-pause-key();
     callback lyrics-key(string);
+    // Ctrl / Alt shortcuts handled in Rust: zoom-in, zoom-out, zoom-reset, back, forward, paste,
+    // copy-now-playing.
+    callback shortcut(string);
     // Window resize / fullscreen toggle: Rust re-wraps the lyric lines for the new size.
     callback relayout-lyrics();
     changed width => { root.relayout-lyrics(); }
     changed height => { root.relayout-lyrics(); }
 
-    // Space and Escape are handled here, so this FocusScope must hold the focus whenever the search
-    // field is not in use. A click anywhere else already gives it back; the search field is
-    // destroyed when the page changes and is hidden behind the lyrics page, so reclaim it then.
     property <string> page: Browse.page;
     property <bool> expanded: Playback.expanded;
+    property <bool> menu-open: Menu.open;
+    property <bool> dialog-open: Dialog.open;
+    changed menu-open => {
+        if (!root.menu-open) {
+            keys.focus();
+        }
+    }
+    changed dialog-open => {
+        if (!root.dialog-open) {
+            keys.focus();
+        }
+    }
     changed page => {
         if (root.page != "search") {
             keys.focus();
@@ -44,7 +65,10 @@ export component MainWindow inherits Window {
         root.relayout-lyrics();
     }
 
-    // Outermost container so keys typed into the search field bubble up to it (Space is typed, not handled).
+    property <length> side-w: 232px;
+    property <length> right-w: Playback.queue-open || Playback.side-open ? 340px : 0px;
+
+    // Outermost container so keys typed into text fields bubble up to it.
     keys := FocusScope {
         x: 0px;
         y: 0px;
@@ -52,12 +76,43 @@ export component MainWindow inherits Window {
         height: root.height;
 
         key-pressed(event) => {
+            if (event.modifiers.control && (event.text == "=" || event.text == "+")) {
+                root.shortcut("zoom-in");
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "-") {
+                root.shortcut("zoom-out");
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "0") {
+                root.shortcut("zoom-reset");
+                return accept;
+            }
+            if (event.modifiers.alt && event.text == Key.LeftArrow) {
+                root.shortcut("back");
+                return accept;
+            }
+            if (event.modifiers.alt && event.text == Key.RightArrow) {
+                root.shortcut("forward");
+                return accept;
+            }
+            if (event.modifiers.control && event.modifiers.shift && (event.text == "c" || event.text == "C")) {
+                root.shortcut("copy-now-playing");
+                return accept;
+            }
+            if (event.modifiers.control && (event.text == "v" || event.text == "V")) {
+                root.shortcut("paste");
+                return accept;
+            }
+            if (event.modifiers.control && (event.text == "l" || event.text == "L" || event.text == "k" || event.text == "K")) {
+                Browse.go("search");
+                return accept;
+            }
             if (event.text == " " && !event.repeat) {
                 root.play-pause-key();
                 return accept;
             }
             if (event.text == Key.Escape) {
-                // Close the lyrics page; otherwise leave the search field.
                 if (Playback.expanded) {
                     Playback.expanded = false;
                 } else {
@@ -76,14 +131,29 @@ export component MainWindow inherits Window {
         Sidebar {
             x: 0px;
             y: 0px;
-            width: 216px;
+            width: root.side-w;
             height: root.height - 88px;
         }
 
         BrowseArea {
-            x: 216px;
+            x: root.side-w;
             y: 0px;
-            width: root.width - 216px;
+            width: root.width - root.side-w - root.right-w;
+            height: root.height - 88px;
+            if Browse.page == "settings" : SettingsPage { }
+        }
+
+        if Playback.queue-open : QueuePanel {
+            x: root.width - 340px;
+            y: 0px;
+            width: 340px;
+            height: root.height - 88px;
+        }
+
+        if Playback.side-open && !Playback.queue-open : NowPlayingPanel {
+            x: root.width - 340px;
+            y: 0px;
+            width: 340px;
             height: root.height - 88px;
         }
 
@@ -94,6 +164,20 @@ export component MainWindow inherits Window {
         }
 
         LyricsOverlay {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+        }
+
+        DialogOverlay {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+        }
+
+        MenuOverlay {
             x: 0px;
             y: 0px;
             width: root.width;

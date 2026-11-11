@@ -1,0 +1,128 @@
+// One modal dialog at a time: confirmations, text input (create / rename / edit details) and
+// the playlist cover picker. src/dialogs.rs opens it and handles the result.
+import { Theme } from "theme.slint";
+import { Label, Caption, Field, PrimaryButton, SecondaryButton, ArtTile } from "widgets.slint";
+
+export global Dialog {
+    in property <bool> open;
+    in property <string> title;
+    in property <string> message;
+    in property <string> field1-label;
+    in-out property <string> field1;
+    in property <string> field2-label;
+    in-out property <string> field2;
+    in property <string> ok-label: "OK";
+    in property <string> cancel-label: "Cancel";
+    in property <bool> danger;
+    // Optional third button (e.g. "Choose image…") and a line about its result.
+    in property <string> extra-label;
+    in property <string> extra-note;
+    in property <image> extra-image;
+    in property <bool> busy;
+    callback ok();
+    callback cancel();
+    callback extra();
+}
+
+export component DialogOverlay inherits Rectangle {
+    if Dialog.open : Rectangle {
+        background: #000000a0;
+        TouchArea { }
+        FocusScope {
+            init => {
+                if (Dialog.field1-label == "") {
+                    self.focus();
+                }
+            }
+            key-pressed(e) => {
+                if (e.text == Key.Escape) {
+                    Dialog.cancel();
+                    return accept;
+                }
+                if (e.text == Key.Return && !Dialog.busy) {
+                    Dialog.ok();
+                    return accept;
+                }
+                return reject;
+            }
+            Rectangle {
+                x: (root.width - self.width) / 2;
+                y: (root.height - self.height) / 2;
+                width: 460px;
+                height: box.preferred-height;
+                border-radius: Theme.radius-card + 4px;
+                background: Theme.surface-raised;
+                drop-shadow-blur: 32px;
+                drop-shadow-color: #000000c0;
+                box := VerticalLayout {
+                    padding: Theme.space-xl;
+                    spacing: Theme.space-md;
+                    Label {
+                        text: Dialog.title;
+                        font-size: Theme.size-heading;
+                        font-weight: Theme.weight-semibold;
+                        wrap: word-wrap;
+                    }
+                    if Dialog.message != "" : Label {
+                        text: Dialog.message;
+                        color: Theme.text-secondary;
+                        wrap: word-wrap;
+                    }
+                    if Dialog.field1-label != "" : VerticalLayout {
+                        spacing: Theme.space-xs;
+                        Caption { text: Dialog.field1-label; }
+                        Field {
+                            auto-focus: true;
+                            text <=> Dialog.field1;
+                            accepted => { Dialog.ok(); }
+                        }
+                    }
+                    if Dialog.field2-label != "" : VerticalLayout {
+                        spacing: Theme.space-xs;
+                        Caption { text: Dialog.field2-label; }
+                        Field { height: 88px; single-line: false; text <=> Dialog.field2; }
+                    }
+                    if Dialog.extra-label != "" : HorizontalLayout {
+                        spacing: Theme.space-md;
+                        alignment: start;
+                        if Dialog.extra-image.width > 0 : ArtTile {
+                            width: 56px;
+                            height: 56px;
+                            radius: Theme.radius-small;
+                            backdrop: Theme.surface-raised;
+                            source: Dialog.extra-image;
+                        }
+                        SecondaryButton { h: 36px; text: Dialog.extra-label; clicked => { Dialog.extra(); } }
+                        Caption { text: Dialog.extra-note; vertical-alignment: center; wrap: word-wrap; }
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: Theme.space-sm;
+                        padding-top: Theme.space-sm;
+                        if Dialog.cancel-label != "" : SecondaryButton { h: 40px; text: Dialog.cancel-label; clicked => { Dialog.cancel(); } }
+                        Rectangle {
+                            width: max(96px, ok-t.preferred-width + 32px);
+                            height: 40px;
+                            border-radius: Theme.radius-control;
+                            opacity: Dialog.busy ? 0.5 : 1;
+                            background: Dialog.danger ? (ok-ta.has-hover ? #ff6b6b : #ff4d4d) : (ok-ta.has-hover ? #ffffff : Theme.text);
+                            ok-t := Label {
+                                width: parent.width;
+                                height: parent.height;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                text: Dialog.busy ? "Working…" : Dialog.ok-label;
+                                font-weight: Theme.weight-semibold;
+                                color: Dialog.danger ? #ffffff : Theme.bg;
+                            }
+                            ok-ta := TouchArea {
+                                enabled: !Dialog.busy;
+                                clicked => { Dialog.ok(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

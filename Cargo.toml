@@ -1,11 +1,11 @@
 [package]
 name = "cadence"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2024"
 
 [features]
 # Writes the CADENCE_SMOKE window snapshot to a PNG.
-smoke = ["dep:png"]
+smoke = []
 # Karaoke mode (Apple Music syllable lyrics). Needs a personal Apple Music media-user-token in
 # local config, so it is for personal builds only: public releases are built without it.
 karaoke = []
@@ -28,30 +28,57 @@ librespot-connect = "0.8.0"
 librespot-oauth = "0.8.0"
 librespot-metadata = "0.8.0"
 
-rspotify = { version = "0.16.1", default-features = false, features = ["client-reqwest", "reqwest-native-tls"] }
-reqwest = { version = "0.12.28", default-features = false, features = ["native-tls"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["native-tls", "json"] }
 
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 jpeg-decoder = { version = "0.3.2", default-features = false }
 serde_json = "1"
+# Library index, listening stats, search history, local files, episode progress (on disk).
+# Local files: tags and embedded artwork (same build librespot uses).
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "ogg", "vorbis", "flac", "wav", "pcm", "aac", "isomp4"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+# PKCE sign-in (web.rs); all three are already in the tree through librespot.
+sha2 = "0.10.9"
+base64 = "0.22.1"
+getrandom = "0.3.4"
 # Font metrics for wrapping lyrics; already in the tree through Slint.
 ttf-parser = "0.25.1"
 # Rasterizes karaoke words once into textures; already in the tree through Slint.
 swash = "0.2.10"
 windows = { version = "0.62.2", features = [
+    "Data_Xml_Dom",
     "Foundation",
     "Media",
+    "UI_Notifications",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
     "Storage_Streams",
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Storage_EnhancedStorage",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Registry",
     "Win32_System_Variant",
     "Win32_System_WinRT",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
 ] }
-png = { version = "0.18.1", optional = true }
+png = "0.18.1"
+# Playlist cover upload (Spotify wants a base64 JPEG under 256 KB).
+jpeg-encoder = "0.6"
 
 [build-dependencies]
 slint-build = "1.18.1"
@@ -62,3 +89,8 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# librespot-connect 0.8.0 with queue editing exposed (vendor/librespot-connect/CADENCE_PATCH.md).
+[patch.crates-io]
+librespot-connect = { path = "vendor/librespot-connect" }
+librespot-playback = { path = "vendor/librespot-playback" }

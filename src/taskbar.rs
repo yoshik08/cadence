@@ -3,6 +3,9 @@
 //! - the process AppUserModelID "Cadence", registered under
 //!   `HKCU\Software\Classes\AppUserModelId\Cadence` with a DisplayName and IconUri, which the
 //!   taskbar, the media flyout (SMTC) and notifications read;
+//! - a Start menu shortcut `Cadence.lnk` carrying the same ID (System.AppUserModel.ID), name and
+//!   icon. The media flyout resolves an unpackaged app's name and icon through such a shortcut;
+//!   without it the flyout said "Unknown app";
 //! - the same ID plus relaunch command / name / icon on the window itself, so a pinned taskbar
 //!   button groups with the running window and launches Cadence again.
 
@@ -50,8 +53,51 @@ fn set_reg(name: PCWSTR, value: &str) {
     }
 }
 
+/// `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Cadence.lnk`, created when missing or
+/// when its target exe no longer exists (Cadence moved). Only touched by Cadence itself.
+fn ensure_shortcut() {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IPersistFile, STGM_READ};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    use windows::core::Interface;
+    let Some(appdata) = std::env::var_os("APPDATA") else { return };
+    let dir = std::path::PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs");
+    let path = dir.join("Cadence.lnk");
+    let exe = exe();
+    if exe.is_empty() {
+        return;
+    }
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let Ok(link) = CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER) else { return };
+        let Ok(file) = link.cast::<IPersistFile>() else { return };
+        let lnk = HSTRING::from(path.as_os_str());
+        if path.exists() && file.Load(&lnk, STGM_READ).is_ok() {
+            let mut buf = [0u16; 260];
+            if link.GetPath(&mut buf, std::ptr::null_mut(), 0).is_ok() {
+                let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                if std::path::Path::new(&String::from_utf16_lossy(&buf[..end])).exists() {
+                    return;
+                }
+            }
+        }
+        let _ = link.SetPath(&HSTRING::from(exe.as_str()));
+        let _ = link.SetIconLocation(&HSTRING::from(exe.as_str()), 0);
+        let _ = link.SetDescription(w!("Cadence"));
+        if let Ok(store) = link.cast::<IPropertyStore>() {
+            let _ = store.SetValue(&PKEY_AppUserModel_ID, &prop_str(APP_ID));
+            let _ = store.Commit();
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        match file.Save(&lnk, true) {
+            Ok(()) => crate::logln!("taskbar: Start menu shortcut written"),
+            Err(e) => crate::logln!("taskbar: cannot write Start menu shortcut: {e}"),
+        }
+    }
+}
+
 /// Call first thing in main(), before any window exists.
 pub fn register_app_id() {
+    ensure_shortcut();
     unsafe {
         let _ = SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(APP_ID));
     }

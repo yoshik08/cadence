@@ -1,0 +1,319 @@
+// Settings page. Only settings that do something; each is applied by src/settings.rs.
+import { Theme } from "theme.slint";
+import { ScrollView, Slider } from "std-widgets.slint";
+import { Label, Caption, Chip, Toggle, Field, PrimaryButton, SecondaryButton, PageFade } from "widgets.slint";
+
+export struct DeviceRow { id: string, name: string }
+
+export global Settings {
+    // Playback
+    in-out property <string> quality: "veryhigh";
+    in-out property <bool> normalize;
+    in-out property <string> loudness: "normal";
+    in-out property <bool> gapless: true;
+    in-out property <bool> autoplay: true;
+    in-out property <bool> mono;
+    in-out property <bool> explicit-filter;
+    in-out property <string> shuffle-style: "random";
+    in-out property <bool> eq-on;
+    in-out property <[float]> eq: [0, 0, 0, 0, 0, 0];
+    in-out property <string> eq-preset: "flat";
+    in property <[DeviceRow]> devices;
+    in-out property <string> device;
+    // Display
+    in-out property <int> zoom: 100;
+    in-out property <bool> compact;
+    in-out property <bool> panel-on-play;
+    in-out property <bool> notify;
+    in-out property <bool> osd;
+    // Window and startup: "off" | "normal" | "minimized"
+    in-out property <string> on-login: "off";
+    in-out property <bool> close-to-tray;
+    in-out property <bool> hotkeys: true;
+    // Quality of life
+    in-out property <bool> bt-pause: true;
+    in-out property <bool> bt-resume;
+    in-out property <bool> lock-pause;
+    // Storage and network
+    in-out property <int> cache-gb: 1;
+    in property <string> cache-info;
+    in-out property <string> proxy;
+    in-out property <bool> gpu: true;
+    in-out property <bool> show-local;
+    in property <[string]> local-folders;
+    // Privacy and account
+    in-out property <bool> private-session;
+    in property <string> account-info;
+    in property <string> memory;
+    in-out property <bool> debug-log;
+    in property <bool> restart-needed;
+    in property <string> note;
+
+    callback changed(string /* key */);
+    callback action(string /* name */);
+    callback eq-band(int, float);
+}
+
+component Group inherits VerticalLayout {
+    in property <string> title;
+    spacing: Theme.space-sm;
+    padding-bottom: Theme.space-xl;
+    Label {
+        text: root.title;
+        font-size: Theme.size-heading;
+        font-weight: Theme.weight-semibold;
+        letter-spacing: Theme.tracking-heading;
+        height: 36px;
+        vertical-alignment: center;
+    }
+    @children
+}
+
+component Row inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> hint;
+    spacing: Theme.space-lg;
+    min-height: 44px;
+    VerticalLayout {
+        horizontal-stretch: 1;
+        alignment: center;
+        spacing: 2px;
+        Label { text: root.label; wrap: word-wrap; }
+        if root.hint != "" : Caption { text: root.hint; wrap: word-wrap; color: Theme.text-tertiary; }
+    }
+    HorizontalLayout {
+        alignment: end;
+        spacing: Theme.space-xs;
+        @children
+    }
+}
+
+component Switch inherits Row {
+    in-out property <bool> on;
+    in property <string> key;
+    Toggle {
+        y: 10px;
+        on: root.on;
+        toggled(v) => {
+            root.on = v;
+            Settings.changed(root.key);
+        }
+    }
+}
+
+export component SettingsPage inherits PageFade {
+    ScrollView {
+        VerticalLayout {
+            padding: Theme.space-2xl;
+            padding-top: Theme.space-xl;
+            spacing: 0;
+            Label {
+                text: "Settings";
+                font-size: Theme.size-title + 6px;
+                font-weight: Theme.weight-bold;
+                letter-spacing: Theme.tracking-display;
+                height: 56px;
+            }
+            if Settings.note != "" || Settings.restart-needed : HorizontalLayout {
+                padding-bottom: Theme.space-lg;
+                spacing: Theme.space-md;
+                Caption { text: Settings.restart-needed ? "Some changes apply after a restart." : Settings.note; vertical-alignment: center; color: Theme.text; }
+                if Settings.restart-needed : SecondaryButton { h: 32px; text: "Restart Cadence"; clicked => { Settings.action("restart"); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            Group {
+                title: "Audio quality";
+                Row {
+                    label: "Streaming quality";
+                    hint: "Cadence streams at 96, 160 or 320 kbps. Lossless is only available in Spotify's official apps.";
+                    Chip { text: "Low · 96"; selected: Settings.quality == "low"; clicked => { Settings.quality = "low"; Settings.changed("quality"); } }
+                    Chip { text: "Normal · 160"; selected: Settings.quality == "normal"; clicked => { Settings.quality = "normal"; Settings.changed("quality"); } }
+                    Chip { text: "Very high · 320"; selected: Settings.quality == "veryhigh"; clicked => { Settings.quality = "veryhigh"; Settings.changed("quality"); } }
+                }
+                Switch { label: "Normalize volume"; hint: "Plays every track at a similar loudness."; key: "normalize"; on <=> Settings.normalize; }
+                if Settings.normalize : Row {
+                    label: "Volume level";
+                    Chip { text: "Quiet"; selected: Settings.loudness == "quiet"; clicked => { Settings.loudness = "quiet"; Settings.changed("loudness"); } }
+                    Chip { text: "Normal"; selected: Settings.loudness == "normal"; clicked => { Settings.loudness = "normal"; Settings.changed("loudness"); } }
+                    Chip { text: "Loud"; selected: Settings.loudness == "loud"; clicked => { Settings.loudness = "loud"; Settings.changed("loudness"); } }
+                }
+                Switch { label: "Gapless playback"; key: "gapless"; on <=> Settings.gapless; }
+                Switch { label: "Autoplay"; hint: "Keep playing similar music when your music ends."; key: "autoplay"; on <=> Settings.autoplay; }
+                Switch { label: "Mono audio"; hint: "Left and right play the same."; key: "mono"; on <=> Settings.mono; }
+                Row {
+                    label: "Filter explicit content";
+                    hint: "Hides explicit tracks in lists and skips them during playback (uses each track's explicit flag).";
+                    Toggle { y: 10px; on: Settings.explicit-filter; toggled(v) => { Settings.explicit-filter = v; Settings.changed("explicit"); } }
+                }
+                Row {
+                    label: "Shuffle style";
+                    hint: "Fewer repeats spreads an artist's songs apart and avoids recently played ones.";
+                    Chip { text: "Random"; selected: Settings.shuffle-style == "random"; clicked => { Settings.shuffle-style = "random"; Settings.changed("shuffle-style"); } }
+                    Chip { text: "Fewer repeats"; selected: Settings.shuffle-style == "fewer"; clicked => { Settings.shuffle-style = "fewer"; Settings.changed("shuffle-style"); } }
+                }
+            }
+
+            Group {
+                title: "Equalizer";
+                Switch { label: "Equalizer"; key: "eq-on"; on <=> Settings.eq-on; }
+                if Settings.eq-on : Row {
+                    label: "Preset";
+                    Chip { text: "Flat"; selected: Settings.eq-preset == "flat"; clicked => { Settings.action("eq:flat"); } }
+                    Chip { text: "Bass"; selected: Settings.eq-preset == "bass"; clicked => { Settings.action("eq:bass"); } }
+                    Chip { text: "Treble"; selected: Settings.eq-preset == "treble"; clicked => { Settings.action("eq:treble"); } }
+                    Chip { text: "Vocal"; selected: Settings.eq-preset == "vocal"; clicked => { Settings.action("eq:vocal"); } }
+                    Chip { text: "Rock"; selected: Settings.eq-preset == "rock"; clicked => { Settings.action("eq:rock"); } }
+                    Chip { text: "Electronic"; selected: Settings.eq-preset == "electronic"; clicked => { Settings.action("eq:electronic"); } }
+                }
+                if Settings.eq-on : HorizontalLayout {
+                    spacing: Theme.space-lg;
+                    height: 64px;
+                    for g[i] in Settings.eq : VerticalLayout {
+                        spacing: 2px;
+                        Caption { text: ["60 Hz", "150 Hz", "400 Hz", "1 kHz", "2.4 kHz", "15 kHz"][i] + "  " + Math.round(g) + " dB"; horizontal-alignment: center; }
+                        Slider {
+                            minimum: -12;
+                            maximum: 12;
+                            value: g;
+                            released(v) => { Settings.eq-band(i, v); }
+                        }
+                    }
+                }
+            }
+
+            Group {
+                title: "Output";
+                Row {
+                    label: "Output device";
+                    hint: "System default follows Windows, including Bluetooth headphones connected later.";
+                    SecondaryButton { h: 32px; text: "Refresh"; clicked => { Settings.action("devices"); } }
+                }
+                VerticalLayout {
+                    spacing: Theme.space-xs;
+                    Chip { text: "System default"; selected: Settings.device == ""; clicked => { Settings.device = ""; Settings.changed("device"); } }
+                    for d in Settings.devices : Chip {
+                        text: d.name;
+                        selected: Settings.device == d.id;
+                        clicked => { Settings.device = d.id; Settings.changed("device"); }
+                    }
+                }
+                Switch { label: "Pause when Bluetooth audio disconnects"; key: "bt-pause"; on <=> Settings.bt-pause; }
+                Switch { label: "Resume when it reconnects"; key: "bt-resume"; on <=> Settings.bt-resume; }
+                Switch { label: "Pause when this PC locks"; key: "lock-pause"; on <=> Settings.lock-pause; }
+            }
+
+            Group {
+                title: "Display";
+                Row {
+                    label: "Zoom";
+                    hint: "Ctrl + plus / minus / 0.";
+                    SecondaryButton { h: 32px; text: "−"; clicked => { Settings.action("zoom-out"); } }
+                    Label { text: Settings.zoom + "%"; width: 56px; horizontal-alignment: center; vertical-alignment: center; }
+                    SecondaryButton { h: 32px; text: "+"; clicked => { Settings.action("zoom-in"); } }
+                }
+                Switch { label: "Compact library layout"; key: "compact"; on <=> Settings.compact; }
+                Switch { label: "Show the now-playing panel when playback starts"; key: "panel-on-play"; on <=> Settings.panel-on-play; }
+                Switch { label: "Track change notifications"; hint: "A Windows notification when the song changes while Cadence is in the background."; key: "notify"; on <=> Settings.notify; }
+                Switch { label: "Media key overlay"; hint: "A small overlay when media keys or global hotkeys are used while Cadence is in the background."; key: "osd"; on <=> Settings.osd; }
+            }
+
+            Group {
+                title: "Startup and window";
+                Row {
+                    label: "Open Cadence when you sign in to Windows";
+                    Chip { text: "No"; selected: Settings.on-login == "off"; clicked => { Settings.on-login = "off"; Settings.changed("on-login"); } }
+                    Chip { text: "Yes"; selected: Settings.on-login == "normal"; clicked => { Settings.on-login = "normal"; Settings.changed("on-login"); } }
+                    Chip { text: "Minimized"; selected: Settings.on-login == "minimized"; clicked => { Settings.on-login = "minimized"; Settings.changed("on-login"); } }
+                }
+                Switch { label: "Close button minimizes to the tray"; key: "close-to-tray"; on <=> Settings.close-to-tray; }
+                Switch {
+                    label: "Global hotkeys";
+                    hint: "Work while other apps have focus: Ctrl+Alt+Space play/pause, Ctrl+Alt+Right next, Ctrl+Alt+Left previous, Ctrl+Alt+L like, Ctrl+Alt+C copy \"Artist - Title\".";
+                    key: "hotkeys";
+                    on <=> Settings.hotkeys;
+                }
+            }
+
+            Group {
+                title: "Local files";
+                Switch { label: "Show local files"; hint: "MP3, FLAC, WAV, AAC, M4A and Ogg files from the folders below."; key: "show-local"; on <=> Settings.show-local; }
+                for f in Settings.local-folders : Row {
+                    label: f;
+                    SecondaryButton { h: 32px; text: "Remove"; clicked => { Settings.action("local-remove:" + f); } }
+                }
+                Row {
+                    label: "";
+                    SecondaryButton { h: 32px; text: "Add folder…"; clicked => { Settings.action("local-add"); } }
+                    SecondaryButton { h: 32px; text: "Rescan"; clicked => { Settings.action("local-rescan"); } }
+                }
+            }
+
+            Group {
+                title: "Storage";
+                Row {
+                    label: "Audio cache size";
+                    hint: Settings.cache-info;
+                    Chip { text: "0.5 GB"; selected: Settings.cache-gb == 0; clicked => { Settings.cache-gb = 0; Settings.changed("cache-gb"); } }
+                    Chip { text: "1 GB"; selected: Settings.cache-gb == 1; clicked => { Settings.cache-gb = 1; Settings.changed("cache-gb"); } }
+                    Chip { text: "2 GB"; selected: Settings.cache-gb == 2; clicked => { Settings.cache-gb = 2; Settings.changed("cache-gb"); } }
+                    Chip { text: "5 GB"; selected: Settings.cache-gb == 5; clicked => { Settings.cache-gb = 5; Settings.changed("cache-gb"); } }
+                }
+                Row {
+                    label: "Cache";
+                    SecondaryButton { h: 32px; text: "Open location"; clicked => { Settings.action("cache-open"); } }
+                    SecondaryButton { h: 32px; text: "Clear cache"; clicked => { Settings.action("cache-clear"); } }
+                }
+            }
+
+            Group {
+                title: "Network and rendering";
+                Row {
+                    label: "Proxy";
+                    hint: "Manual proxy, for example http://host:8080 or socks5://host:1080. Empty = none. Applies after a restart.";
+                    Field { width: 260px; text <=> Settings.proxy; placeholder: "No proxy"; accepted => { Settings.changed("proxy"); } }
+                    SecondaryButton { h: 40px; text: "Apply"; clicked => { Settings.changed("proxy"); } }
+                }
+                Switch { label: "Hardware acceleration"; hint: "Draw with the GPU (OpenGL). Off uses the software renderer: less memory, more CPU. Applies after a restart."; key: "gpu"; on <=> Settings.gpu; }
+            }
+
+            Group {
+                title: "Privacy";
+                Switch {
+                    label: "Private session";
+                    hint: "Stops recording plays in Cadence's local listening stats. It can't hide your activity from Spotify.";
+                    key: "private-session";
+                    on <=> Settings.private-session;
+                }
+                Row { label: "Language"; hint: "Cadence is available in English only."; Label { text: "English"; vertical-alignment: center; } }
+            }
+
+            Group {
+                title: "Account";
+                Row {
+                    label: "Spotify sign-in";
+                    hint: Settings.account-info;
+                    SecondaryButton { h: 32px; text: "Re-authorize Spotify"; clicked => { Settings.action("reauth"); } }
+                }
+                Row {
+                    label: "Apps connected to your Spotify account";
+                    SecondaryButton { h: 32px; text: "spotify.com/account/apps"; clicked => { Settings.action("account-apps"); } }
+                }
+            }
+
+            Group {
+                title: "Cadence";
+                Row {
+                    label: "Memory";
+                    hint: Settings.memory;
+                    SecondaryButton { h: 32px; text: "Refresh"; clicked => { Settings.action("memory"); } }
+                }
+                Switch { label: "Debug logging"; hint: "Writes more detail to cadence.log."; key: "debug-log"; on <=> Settings.debug-log; }
+                Row {
+                    label: "Log file";
+                    SecondaryButton { h: 32px; text: "Open log folder"; clicked => { Settings.action("log-open"); } }
+                }
+            }
+        }
+    }
+}

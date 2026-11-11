@@ -1,0 +1,257 @@
+// Queue panel: Now Playing, Next Up (Play Next and queued items first, draggable; then the
+// context), Recently played. src/queue.rs fills `Queue` from librespot's Connect queue.
+import { Theme } from "theme.slint";
+import { Cover } from "cover.slint";
+import { ScrollView } from "std-widgets.slint";
+import { Playback, IconButton, Icons } from "now_playing.slint";
+
+export struct QueueRow {
+    title: string,
+    artist: string,
+    duration: string,
+    uri: string,
+    uid: string,
+    // In the user queue (draggable, removable) rather than the playing context.
+    queued: bool,
+    play-next: bool,
+    unavailable: bool,
+}
+
+export global Queue {
+    in property <[QueueRow]> next;
+    in property <[QueueRow]> recent;
+    in property <int> queued-count;
+    in property <string> context-name;
+    in property <string> summary;
+    callback remove(string /* uid */);
+    callback move-to(string /* uid */, int /* position in the user queue */);
+    callback clear();
+    // Skip forward to upcoming row n.
+    callback play-row(int);
+    // Right-click / menu key on a row: (uri, uid, x, y) in window coordinates.
+    callback row-menu(string, string, length, length);
+}
+
+component Label inherits Text {
+    font-family: Theme.font-family;
+    font-size: Theme.size-body;
+    color: Theme.text;
+    overflow: elide;
+    min-width: 0px;
+}
+
+component Heading inherits Label {
+    font-size: Theme.size-caption;
+    letter-spacing: Theme.tracking-caption;
+    font-weight: Theme.weight-semibold;
+    color: Theme.text-tertiary;
+    height: 28px;
+    vertical-alignment: center;
+}
+
+component Row inherits Rectangle {
+    in property <QueueRow> item;
+    in property <int> index;
+    in property <bool> draggable;
+    in property <length> row-h: 52px;
+    // Rows of the user queue; a drag is clamped to them.
+    in property <int> drag-max;
+    property <length> press-y;
+    property <bool> dragging;
+    property <length> offset;
+    height: root.row-h;
+    z: root.dragging ? 10 : 0;
+
+    Rectangle {
+        y: root.offset;
+        border-radius: Theme.radius-control;
+        background: root.dragging ? Theme.surface-raised : (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent));
+        drop-shadow-blur: root.dragging ? 16px : 0px;
+        drop-shadow-color: #00000080;
+
+        if root.draggable : Path {
+            x: 6px;
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+            viewbox-width: 12;
+            viewbox-height: 12;
+            stroke: Theme.text-tertiary;
+            stroke-width: 1.2px;
+            commands: "M2 3h8 M2 6h8 M2 9h8";
+            opacity: ta.has-hover || root.dragging ? 1 : 0;
+        }
+        VerticalLayout {
+            x: 24px;
+            width: parent.width - 24px - 52px - 32px;
+            alignment: center;
+            spacing: 2px;
+            Label {
+                text: root.item.title;
+                font-weight: Theme.weight-medium;
+                color: root.item.unavailable ? Theme.text-tertiary : Theme.text;
+            }
+            Label {
+                text: root.item.play-next ? "Playing next · " + root.item.artist : root.item.artist;
+                font-size: Theme.size-caption;
+                letter-spacing: Theme.tracking-caption;
+                color: Theme.text-secondary;
+            }
+        }
+        Label {
+            x: parent.width - 52px - 32px;
+            width: 44px;
+            y: (parent.height - self.height) / 2;
+            text: root.item.duration;
+            font-size: Theme.size-caption;
+            color: Theme.text-tertiary;
+            horizontal-alignment: right;
+        }
+        ta := TouchArea {
+            mouse-cursor: root.dragging ? MouseCursor.grabbing : MouseCursor.default;
+            pointer-event(e) => {
+                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                    Queue.row-menu(root.item.uri, root.item.uid, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
+                if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                    root.press-y = self.mouse-y;
+                }
+                if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                    if (root.dragging) {
+                        root.dragging = false;
+                        root.offset = 0px;
+                        Queue.move-to(root.item.uid, Math.clamp(root.index + Math.round((self.mouse-y - root.press-y) / root.row-h), 0, root.drag-max - 1));
+                    }
+                }
+            }
+            moved => {
+                if (self.pressed && root.draggable) {
+                    if (abs(self.mouse-y - root.press-y) > 6px) {
+                        root.dragging = true;
+                    }
+                    if (root.dragging) {
+                        root.offset = self.mouse-y - root.press-y;
+                    }
+                }
+            }
+            double-clicked => {
+                if (root.index >= 0) {
+                    Queue.play-row(root.index);
+                }
+            }
+        }
+        // Remove (queued items only).
+        if root.item.queued : IconButton {
+            x: parent.width - 32px - 4px;
+            y: (parent.height - self.height) / 2;
+            width: 32px;
+            height: 32px;
+            icon-size: 16px;
+            commands: Icons.close;
+            opacity: ta.has-hover || self.has-hover ? 1 : 0;
+            clicked => { Queue.remove(root.item.uid); }
+        }
+    }
+}
+
+export component QueuePanel inherits Rectangle {
+    background: Theme.bg;
+    clip: true;
+    Rectangle { x: 0; width: 1px; background: Theme.divider; }
+
+    VerticalLayout {
+        padding: Theme.space-lg;
+        padding-top: Theme.space-xl;
+        spacing: Theme.space-sm;
+        HorizontalLayout {
+            height: 32px;
+            Label {
+                text: "Queue";
+                font-size: Theme.size-heading;
+                font-weight: Theme.weight-semibold;
+                letter-spacing: Theme.tracking-heading;
+                vertical-alignment: center;
+            }
+            if Queue.queued-count > 0 : Rectangle {
+                width: 64px;
+                Label {
+                    width: parent.width;
+                    height: parent.height;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                    text: "Clear";
+                    font-size: Theme.size-caption;
+                    font-weight: Theme.weight-medium;
+                    color: clear-ta.has-hover ? Theme.text : Theme.text-secondary;
+                }
+                clear-ta := TouchArea { clicked => { Queue.clear(); } }
+            }
+            IconButton {
+                width: 32px;
+                height: 32px;
+                icon-size: 16px;
+                commands: Icons.close;
+                clicked => { Playback.toggle-queue(); }
+            }
+        }
+        if Queue.summary != "" : Label {
+            text: Queue.summary;
+            font-size: Theme.size-caption;
+            color: Theme.text-tertiary;
+        }
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 0;
+                padding-bottom: Theme.space-xl;
+                Heading { text: "Now playing"; }
+                if Playback.title != "" : HorizontalLayout {
+                    height: 64px;
+                    spacing: Theme.space-md;
+                    padding-left: 4px;
+                    Cover {
+                        width: 48px;
+                        height: 48px;
+                        y: 8px;
+                        source: Playback.bar-art;
+                        radius: Theme.radius-small;
+                        backdrop: Theme.bg;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        Label { text: Playback.title; font-weight: Theme.weight-semibold; color: Playback.accent; }
+                        Label { text: Playback.artist; font-size: Theme.size-caption; color: Theme.text-secondary; }
+                    }
+                }
+                if Playback.title == "" : Label { text: "Nothing playing"; color: Theme.text-tertiary; height: 40px; }
+
+                if Queue.queued-count > 0 : Heading { text: "Next in queue"; }
+                for r[i] in Queue.next : VerticalLayout {
+                    // The context heading goes above the first context row.
+                    if i == Queue.queued-count : Heading {
+                        text: Queue.context-name != "" ? "Next from: " + Queue.context-name : "Next up";
+                        TouchArea { clicked => { Playback.open-context(); } }
+                    }
+                    Row {
+                        item: r;
+                        index: i;
+                        draggable: r.queued;
+                        drag-max: Queue.queued-count;
+                    }
+                }
+                if Queue.next.length == 0 && Playback.title != "" : Label {
+                    text: "Nothing up next.";
+                    color: Theme.text-tertiary;
+                    height: 40px;
+                }
+                if Queue.recent.length > 0 : Heading { text: "Recently played"; }
+                for r[i] in Queue.recent : Row {
+                    item: r;
+                    index: -1;
+                    opacity: 0.7;
+                }
+            }
+        }
+    }
+}

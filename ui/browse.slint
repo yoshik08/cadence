@@ -1,520 +1,407 @@
-// Cadence browsing UI: sidebar, Home, Search and list pages (playlist / album / artist / Liked Songs).
-// Everything here is driven by `Browse`; src/browse.rs fills the models and answers the callbacks.
+// Cadence browsing UI: sidebar, navigation and every browse page. Driven by `Browse`;
+// src/browse.rs fills the models and answers the callbacks.
 import { Theme } from "theme.slint";
-import { Cover } from "cover.slint";
 import { ScrollView, ListView, Palette } from "std-widgets.slint";
-import { Icons } from "now_playing.slint";
+import { Icons, Playback } from "now_playing.slint";
+import { Menu } from "menu.slint";
+import {
+    Card, TrackRow, ShelfData, Label, Caption, Glyph, PageFade, ArtTile, CardView, Shelf, TrackItem,
+    TableHeader, PrimaryButton, SecondaryButton, RoundIcon, Chip, Field, SectionTitle, SkeletonCard
+} from "widgets.slint";
 
-export struct Card {
+export { Card, TrackRow, ShelfData }
+
+export struct SideItem {
     title: string,
     subtitle: string,
     uri: string,
+    // "playlist" | "liked" | "folder" | "local" | "show" | "album" | "artist"
+    kind: string,
+    pinned: bool,
+    depth: int,
+    open: bool,
     art: image,
-    liked: bool,
 }
 
-export struct TrackRow {
+export struct StatRow {
+    rank: int,
     title: string,
-    artist: string,
-    album: string,
-    duration: string,
+    subtitle: string,
+    value: string,
     uri: string,
 }
 
 export global Browse {
-    // "home" | "search" | "list". Rust owns it; every navigation also toggles `flip` so that a
-    // list opened from a list still replays the page transition.
+    // Navigation. `page`: home | search | library | list | artist | stats | profile | settings.
     in-out property <string> page: "home";
     in property <bool> flip;
     in property <bool> loading;
     in property <string> error;
-    // One quiet line while the page has nothing to show yet ("Loading your library…", sign-in
-    // progress). Empty hides it. Plain property, so it renders even before browse::init runs.
     in property <string> status;
     in property <string> current-uri;
     in property <color> accent: Theme.accent;
+    in property <bool> can-back;
+    in property <bool> can-forward;
+    // Page scroll, two-way bound to the page's list; Rust saves and restores it per history entry.
+    in-out property <length> scroll-y;
+    in property <bool> compact;
+    callback back();
+    callback forward();
+    callback open(string);
+    callback go(string);
+    callback play(string, int);
+    callback play-all(string, bool);
+    callback play-card(string);
+    callback card-menu(string, length, length);
 
     // Home
-    in property <[Card]> recent;
-    in property <[Card]> playlists;
-    // The sidebar's playlist list (title + uri only), filled once per launch.
-    in property <[Card]> side-playlists;
+    in property <string> greeting;
+    in property <[ShelfData]> shelves;
+    in property <bool> skeleton;
+    in property <color> home-tint: Theme.bg;
+    in-out property <bool> home-editing;
+    callback home-move(string, int);
+    callback home-hide(string, bool);
+
+    // Sidebar
+    in property <[SideItem]> side-items;
+    in-out property <string> side-filter;
+    in property <bool> show-local;
+    callback side-filter-edited(string);
+    callback side-toggle(string);
+    callback new-folder();
+    callback create-playlist();
 
     // Search
+    in-out property <string> query;
+    in property <bool> has-top;
+    in property <Card> top;
     in property <[TrackRow]> found-tracks;
-    in property <[Card]> found-artists;
-    in property <[Card]> found-albums;
-    in property <[Card]> found-playlists;
+    in property <[ShelfData]> found-shelves;
+    in property <[string]> history;
     in property <string> search-note;
+    in-out property <int> search-sel: -1;
+    callback search(string);
+    callback search-enter();
+    callback history-pick(string);
+    callback history-remove(string);
+    callback history-clear();
 
-    // List ("playlist" | "album" | "artist" | "liked")
+    // Library
+    in-out property <string> lib-tab: "playlist";
+    in-out property <string> lib-sort: "recent";
+    in-out property <string> lib-filter;
+    in property <[Card]> lib-items;
+    in property <string> lib-note;
+    callback lib-changed();
+
+    // List pages: playlist | album | liked | show | local | folder | showall | artist-liked
     in property <string> list-kind;
     in property <string> list-uri;
+    in property <string> list-type;
     in property <string> list-title;
+    in property <string> list-desc;
     in property <string> list-meta;
+    in property <string> list-owner;
+    in property <string> list-owner-uri;
     in property <string> list-note;
     in property <image> list-art;
+    in property <bool> list-round;
+    in property <bool> list-editable;
+    in property <bool> list-saved;
+    in property <bool> list-can-save;
+    in property <bool> list-playable: true;
+    in property <bool> list-more;
     in property <[TrackRow]> tracks;
+    in property <[Card]> list-cards;
+    in property <string> sort-key;
+    in property <bool> sort-desc;
+    callback sort-by(string);
+    callback list-menu(length, length);
+    callback toggle-save();
+    callback track-heart(int);
+    callback load-more();
+    callback open-owner();
+    // Find something for your playlist
+    in property <[TrackRow]> find-tracks;
+    in property <[Card]> find-cards;
+    in property <string> find-note;
+    in property <string> find-expanded;
+    in-out property <bool> find-open;
+    callback find(string);
+    callback find-add(int);
+    callback find-expand(string);
 
-    callback open(string);
-    callback search(string);
-    callback play(string, int);
-    callback go-home();
-    callback go-search();
+    // Artist
+    in property <[TrackRow]> popular;
+    in property <string> popular-title: "Popular";
+    in property <string> popular-note;
+    in property <[Card]> disc;
+    in-out property <string> disc-filter: "all";
+    in property <string> liked-note;
+    in property <bool> following;
+    callback set-disc-filter(string);
+    callback toggle-follow();
+    callback open-artist-liked();
+
+    // Stats
+    in-out property <string> stats-range: "4w";
+    in property <string> stats-summary;
+    in property <[StatRow]> stat-songs;
+    in property <[StatRow]> stat-artists;
+    in property <[StatRow]> stat-albums;
+    callback stats-changed();
+    callback stats-clear();
+
+    // Profile (Cadence-local)
+    in-out property <string> profile-name;
+    in-out property <string> profile-bio;
+    in property <image> profile-pic;
+    callback profile-save();
+    callback profile-pick();
 }
 
-component Label inherits Text {
-    font-family: Theme.font-family;
-    font-size: Theme.size-body;
-    font-weight: Theme.weight-regular;
-    color: Theme.text;
-    overflow: elide;
-    min-width: 0px;
-}
-
-// Fades and lifts a page in when it is created. Reading opacity and y in init forces the first
-// evaluation, so that flipping `shown` afterwards animates instead of jumping.
-component PageFade inherits Rectangle {
-    property <bool> shown: false;
-    width: 100%;
-    height: 100%;
-    opacity: root.shown ? 1 : 0;
-    y: root.shown ? 0px : Theme.space-lg;
-    animate opacity { duration: Theme.duration-normal; easing: Theme.ease; }
-    animate y { duration: Theme.duration-normal; easing: Theme.ease; }
-    init => {
-        if (root.opacity < 1 && root.y >= 0px) {
-            root.shown = true;
-        }
-    }
-    @children
-}
-
-// Rounded art (Cover cuts the corners in the `backdrop` colour, so it must match what is behind
-// the tile) with a quiet placeholder; the heart marks Liked Songs.
-component ArtTile inherits Rectangle {
-    in property <image> source;
-    in property <length> radius;
-    in property <color> backdrop: Theme.bg;
-    in property <bool> liked;
-    in property <bool> hovered;
-    in property <bool> pressed;
-    Cover {
-        width: parent.width;
-        height: parent.height;
-        source: root.source;
-        radius: root.radius;
-        backdrop: root.backdrop;
-        background: Theme.surface-raised;
-    }
-    if root.liked : Path {
-        width: parent.width * 0.38;
-        height: parent.height * 0.38;
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        viewbox-width: 24;
-        viewbox-height: 24;
-        fill: Browse.accent;
-        commands: "M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z";
-    }
-    Rectangle {
-        border-radius: root.radius;
-        background: root.pressed ? Theme.pressed : (root.hovered ? Theme.hover : transparent);
-        animate background { duration: Theme.duration-fast; }
-    }
-}
-
-component SectionTitle inherits HorizontalLayout {
-    in property <string> title;
-    padding-left: Theme.space-2xl;
-    padding-right: Theme.space-2xl;
-    Label {
-        text: root.title;
-        font-size: Theme.size-heading;
-        font-weight: Theme.weight-semibold;
-        letter-spacing: Theme.tracking-heading;
-    }
-}
-
-component Section inherits VerticalLayout {
-    in property <string> title;
-    spacing: Theme.space-md;
-    alignment: start;
-    SectionTitle { title: root.title; }
-    @children
-}
-
-component CardView inherits Rectangle {
-    in property <Card> card;
-    in property <bool> round;
-    in property <length> art-size: 160px;
-    callback clicked();
-    width: root.art-size;
-    height: root.art-size + 40px;
-    VerticalLayout {
-        spacing: 0;
-        ArtTile {
-            width: root.art-size;
-            height: root.art-size;
-            radius: root.round ? root.art-size / 2 : Theme.radius-art;
-            source: root.card.art;
-            hovered: ta.has-hover;
-            pressed: ta.pressed;
-        }
-        Rectangle { height: Theme.space-xs; }
-        Label {
-            text: root.card.title;
-            font-weight: Theme.weight-medium;
-            horizontal-alignment: root.round ? center : left;
-        }
-        Label {
-            text: root.card.subtitle;
-            font-size: Theme.size-caption;
-            letter-spacing: Theme.tracking-caption;
-            color: Theme.text-secondary;
-            horizontal-alignment: root.round ? center : left;
-        }
-    }
-    ta := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
-
-// Horizontal shelf. Sideways wheel / trackpad input scrolls it through the TouchArea under the
-// cards; vertical input is rejected so the page keeps scrolling. Dragging also pans.
-component Shelf inherits Rectangle {
-    in property <[Card]> model;
-    in property <bool> round;
-    in property <length> art-size: 160px;
-    in property <length> lead: Theme.space-2xl;
-    callback picked(string);
-    height: root.art-size + 40px;
-    TouchArea {
-        scroll-event(e) => {
-            if (abs(e.delta-y) > abs(e.delta-x)) {
-                return reject;
-            }
-            flick.content-x = max(flick.width - flick.content-width, min(0px, flick.content-x + e.delta-x));
-            return accept;
-        }
-    }
-    flick := Flickable {
-        content-width: root.lead * 2 + root.model.length * (root.art-size + Theme.space-lg) - Theme.space-lg;
-        content-height: root.height;
-        for c[i] in root.model : CardView {
-            x: root.lead + i * (root.art-size + Theme.space-lg);
-            card: c;
-            round: root.round;
-            art-size: root.art-size;
-            clicked => { root.picked(c.uri); }
-        }
-    }
-}
-
-// One row of a track list. Columns are placed by hand so every row lines up and the album
-// column can disappear on narrow windows.
-component TrackItem inherits Rectangle {
-    in property <TrackRow> item;
-    in property <int> index;
-    callback clicked();
-    height: 48px;
-
-    property <bool> playing: root.item.uri != "" && root.item.uri == Browse.current-uri;
-    property <bool> wide: root.width >= 820px;
-    property <length> pad: Theme.space-lg;
-    property <length> idx-w: 28px;
-    property <length> dur-w: 56px;
-    property <length> gap: Theme.space-lg;
-    property <length> inner-w: root.width - 2 * Theme.space-lg;
-    property <length> avail: inner-w - 2 * pad - idx-w - dur-w - (wide ? 4 : 3) * gap;
-    property <length> title-w: avail * (wide ? 0.40 : 0.58);
-    property <length> artist-w: avail * (wide ? 0.30 : 0.42);
-    property <length> album-w: avail * 0.30;
-    property <length> title-x: Theme.space-lg + pad + idx-w + gap;
-    property <length> artist-x: title-x + title-w + gap;
-    property <length> album-x: artist-x + artist-w + gap;
-
-    Rectangle {
-        x: Theme.space-lg;
-        width: root.inner-w;
-        border-radius: Theme.radius-control;
-        background: ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent);
-        animate background { duration: Theme.duration-fast; }
-    }
-    if !root.playing : Label {
-        x: Theme.space-lg + root.pad;
-        width: root.idx-w;
-        y: (parent.height - self.height) / 2;
-        text: "\{root.index + 1}";
-        color: Theme.text-tertiary;
-        horizontal-alignment: left;
-    }
-    if root.playing : Rectangle {
-        x: Theme.space-lg + root.pad;
-        y: (parent.height - 12px) / 2;
-        width: 12px;
-        height: 12px;
-        Rectangle { x: 0px; y: 4px; width: 2px; height: 8px; background: Browse.accent; border-radius: 1px; }
-        Rectangle { x: 5px; y: 0px; width: 2px; height: 12px; background: Browse.accent; border-radius: 1px; }
-        Rectangle { x: 10px; y: 6px; width: 2px; height: 6px; background: Browse.accent; border-radius: 1px; }
-    }
-    Label {
-        x: root.title-x;
-        width: root.title-w;
-        y: (parent.height - self.height) / 2;
-        text: root.item.title;
-        font-weight: Theme.weight-medium;
-        color: root.playing ? Browse.accent : Theme.text;
-    }
-    Label {
-        x: root.artist-x;
-        width: root.artist-w;
-        y: (parent.height - self.height) / 2;
-        text: root.item.artist;
-        color: Theme.text-secondary;
-    }
-    if root.wide : Label {
-        x: root.album-x;
-        width: root.album-w;
-        y: (parent.height - self.height) / 2;
-        text: root.item.album;
-        color: Theme.text-tertiary;
-    }
-    Label {
-        x: root.width - Theme.space-lg - root.pad - root.dur-w;
-        width: root.dur-w;
-        y: (parent.height - self.height) / 2;
-        text: root.item.duration;
-        color: Theme.text-tertiary;
-        horizontal-alignment: right;
-    }
-    ta := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
-
-// Playlist row on Home. Art is loaded lazily by the Rust model, only for rows that get instantiated.
-component PlaylistRow inherits Rectangle {
-    in property <Card> card;
-    callback clicked();
-    height: 72px;
-
-    // What the hover / pressed tint looks like over the page (alpha 0.06 / 0.12 of text over bg),
-    // so the thumbnail's corner masks blend in.
-    property <color> behind-thumb: ta.pressed ? Theme.text.mix(Theme.bg, 0.12) : (ta.has-hover ? Theme.text.mix(Theme.bg, 0.06) : Theme.bg);
-    animate behind-thumb { duration: Theme.duration-fast; }
-
-    Rectangle {
-        x: Theme.space-xl;
-        width: parent.width - 2 * Theme.space-xl;
-        border-radius: Theme.radius-control;
-        background: ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent);
-        animate background { duration: Theme.duration-fast; }
-    }
-    ArtTile {
-        x: Theme.space-xl + Theme.space-sm;
-        y: Theme.space-sm;
-        width: 56px;
-        height: 56px;
-        radius: Theme.radius-thumb;
-        backdrop: root.behind-thumb;
-        source: root.card.art;
-        liked: root.card.liked;
-    }
-    VerticalLayout {
-        x: Theme.space-xl + Theme.space-sm + 56px + Theme.space-lg;
-        width: parent.width - self.x - Theme.space-xl - Theme.space-lg;
-        height: parent.height;
-        alignment: center;
-        spacing: 2px;
-        Label {
-            text: root.card.title;
-            font-weight: Theme.weight-medium;
-        }
-        Label {
-            text: root.card.subtitle;
-            font-size: Theme.size-caption;
-            letter-spacing: Theme.tracking-caption;
-            color: Theme.text-secondary;
-        }
-    }
-    ta := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
-
-component NavIcon inherits Path {
-    in property <color> tint;
-    width: 20px;
-    height: 20px;
-    viewbox-width: 24;
-    viewbox-height: 24;
-    fill: transparent;
-    stroke: root.tint;
-    stroke-width: 1.75px * 20 / 24;
-    stroke-line-cap: round;
-    stroke-line-join: round;
-}
+// --------------------------------------------------------------------------------------------
+// Sidebar
 
 component NavItem inherits Rectangle {
-    in property <string> label;
+    in property <SideItem> item;
     in property <string> icon;
     in property <bool> selected;
     in property <length> item-height: 40px;
     in property <bool> quiet;
     callback clicked();
+    callback menu(length, length);
     height: root.item-height;
     border-radius: Theme.radius-control;
     background: ta.pressed ? Theme.pressed : (root.selected ? Theme.surface-raised : (ta.has-hover ? Theme.hover : transparent));
     animate background { duration: Theme.duration-fast; }
-    NavIcon {
-        x: Theme.space-md;
+    property <length> indent: root.item.depth * 14px;
+    if root.item.kind == "folder" : Glyph {
+        x: Theme.space-xs + root.indent;
         y: (parent.height - self.height) / 2;
+        size: 12px;
+        commands: root.item.open ? Icons.chevron-down : Icons.forward;
+        tint: Theme.text-tertiary;
+    }
+    Glyph {
+        x: Theme.space-md + root.indent + (root.item.kind == "folder" ? 6px : 0px);
+        y: (parent.height - self.height) / 2;
+        size: 18px;
         commands: root.icon;
-        tint: root.selected || ta.has-hover ? Theme.text : Theme.text-secondary;
-        animate tint { duration: Theme.duration-fast; }
+        solid: root.item.kind == "liked";
+        tint: root.item.kind == "liked" ? Theme.accent : (root.selected || ta.has-hover ? Theme.text : Theme.text-secondary);
     }
     Label {
-        x: Theme.space-md + 20px + Theme.space-md;
+        x: Theme.space-md + 18px + Theme.space-md + root.indent + (root.item.kind == "folder" ? 6px : 0px);
         y: (parent.height - self.height) / 2;
-        width: parent.width - self.x - Theme.space-md;
-        text: root.label;
+        width: parent.width - self.x - Theme.space-md - (root.item.pinned ? 16px : 0px);
+        text: root.item.title;
         font-weight: root.quiet ? Theme.weight-regular : Theme.weight-medium;
         color: root.selected ? Theme.text : Theme.text-secondary;
-        animate color { duration: Theme.duration-fast; }
+    }
+    if root.item.pinned : Glyph {
+        x: parent.width - 22px;
+        y: (parent.height - self.height) / 2;
+        size: 12px;
+        commands: Icons.pin;
+        tint: Theme.accent;
     }
     ta := TouchArea {
         clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
     }
 }
 
-// Fixed 216 px wide: navigation, then the user's playlists.
 export component Sidebar inherits Rectangle {
-    width: 216px;
+    width: 232px;
     background: Theme.bg;
-    Rectangle {
-        x: parent.width - 1px;
-        width: 1px;
-        background: Theme.divider;
-    }
+    Rectangle { x: parent.width - 1px; width: 1px; background: Theme.divider; }
     VerticalLayout {
         padding: Theme.space-md;
-        padding-top: Theme.space-xl;
+        padding-top: Theme.space-lg;
         spacing: Theme.space-xs;
         HorizontalLayout {
             height: 40px;
-            padding-left: Theme.space-md;
+            padding-left: Theme.space-xs;
+            spacing: Theme.space-xs;
+            RoundIcon {
+                width: 32px; height: 32px;
+                icon: Icons.back;
+                enabled: Browse.can-back;
+                clicked => { Browse.back(); }
+            }
+            RoundIcon {
+                width: 32px; height: 32px;
+                icon: Icons.forward;
+                enabled: Browse.can-forward;
+                clicked => { Browse.forward(); }
+            }
             Label {
                 text: "Cadence";
                 font-size: Theme.size-heading;
                 font-weight: Theme.weight-bold;
                 letter-spacing: Theme.tracking-heading;
                 vertical-alignment: center;
+                horizontal-alignment: right;
             }
         }
-        Rectangle { height: Theme.space-md; }
-        NavItem {
-            label: "Home";
-            icon: Icons.home;
-            selected: Browse.page == "home";
-            clicked => { Browse.go-home(); }
-        }
-        NavItem {
-            label: "Search";
-            icon: Icons.search;
-            selected: Browse.page == "search";
-            clicked => { Browse.go-search(); }
-        }
-        NavItem {
-            label: "Liked Songs";
-            icon: Icons.heart;
-            selected: Browse.page == "list" && Browse.list-kind == "liked";
-            clicked => { Browse.open("liked"); }
-        }
-        if Browse.side-playlists.length > 0 : Rectangle {
-            height: Theme.space-xl + 12px;
-            Rectangle { x: Theme.space-md; y: Theme.space-md; width: parent.width - 2 * Theme.space-md; height: 1px; background: Theme.divider; }
-            Label {
-                x: Theme.space-md;
-                y: Theme.space-md + 10px;
-                text: "Playlists";
+        Rectangle { height: Theme.space-xs; }
+        NavItem { item: { title: "Home" }; icon: Icons.home; selected: Browse.page == "home"; clicked => { Browse.go("home"); } }
+        NavItem { item: { title: "Search" }; icon: Icons.search; selected: Browse.page == "search"; clicked => { Browse.go("search"); } }
+        NavItem { item: { title: "Your Library" }; icon: Icons.library; selected: Browse.page == "library"; clicked => { Browse.go("library"); } }
+        HorizontalLayout {
+            height: 36px;
+            padding-top: Theme.space-sm;
+            spacing: Theme.space-xs;
+            Field {
+                height: 30px;
+                placeholder: "Filter";
                 font-size: Theme.size-caption;
-                letter-spacing: Theme.tracking-caption;
-                color: Theme.text-tertiary;
+                text <=> Browse.side-filter;
+                edited(t) => { Browse.side-filter-edited(t); }
+            }
+            RoundIcon {
+                width: 30px; height: 30px;
+                icon: Icons.folder;
+                clicked => { Browse.new-folder(); }
+            }
+            RoundIcon {
+                width: 30px; height: 30px;
+                icon: Icons.plus;
+                clicked => { Browse.create-playlist(); }
             }
         }
         ListView {
             vertical-stretch: 1;
             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
-            for p in Browse.side-playlists : NavItem {
-                item-height: 34px;
+            for p in Browse.side-items : NavItem {
+                item: p;
+                item-height: Browse.compact ? 30px : 36px;
                 quiet: true;
-                label: p.title;
-                icon: Icons.playlist;
-                selected: Browse.page == "list" && Browse.list-uri == p.uri;
-                clicked => { Browse.open(p.uri); }
+                icon: p.kind == "liked" ? Icons.heart : p.kind == "folder" ? Icons.folder : p.kind == "local" ? Icons.music : p.kind == "show" ? Icons.mic : Icons.playlist;
+                selected: (Browse.page == "list" || Browse.page == "artist") && Browse.list-uri == p.uri;
+                clicked => {
+                    if (p.kind == "folder") {
+                        Browse.side-toggle(p.uri);
+                    } else {
+                        Browse.open(p.uri);
+                    }
+                }
+                menu(x, y) => { Browse.card-menu(p.uri, x, y); }
             }
+        }
+        HorizontalLayout {
+            height: 36px;
+            spacing: Theme.space-xs;
+            alignment: start;
+            RoundIcon { width: 36px; height: 36px; icon: Icons.chart; clicked => { Browse.go("stats"); } }
+            RoundIcon { width: 36px; height: 36px; icon: Icons.user; clicked => { Browse.go("profile"); } }
+            RoundIcon { width: 36px; height: 36px; icon: Icons.gear; clicked => { Browse.go("settings"); } }
         }
     }
 }
 
-// Display-size page title with the optional status line under it. Every page uses it so the
-// title line sits at the same y.
+// --------------------------------------------------------------------------------------------
+// Pages
+
 component PageTitle inherits VerticalLayout {
     in property <string> title;
     in property <string> status;
     padding-top: Theme.space-xl;
     padding-left: Theme.space-2xl;
     padding-right: Theme.space-2xl;
-    padding-bottom: Theme.space-xl;
+    padding-bottom: Theme.space-lg;
     spacing: Theme.space-xs;
     vertical-stretch: 0;
     Label {
         text: root.title;
-        font-size: Theme.size-display;
+        font-size: Theme.size-title + 6px;
         font-weight: Theme.weight-bold;
         letter-spacing: Theme.tracking-display;
     }
-    if root.status != "" : Label {
-        text: root.status;
-        color: Theme.text-secondary;
+    if root.status != "" : Label { text: root.status; color: Theme.text-secondary; }
+}
+
+component ShelfBlock inherits VerticalLayout {
+    in property <ShelfData> data;
+    in property <int> index;
+    in property <length> art-size: 160px;
+    in property <bool> skeleton;
+    spacing: Theme.space-md;
+    padding-bottom: Theme.space-xl;
+    HorizontalLayout {
+        padding-right: Theme.space-2xl;
+        SectionTitle {
+            title: root.data.title;
+            more: root.data.more != "" ? "Show all" : "";
+            more-clicked => { Browse.open(root.data.more); }
+        }
+        if Browse.home-editing : HorizontalLayout {
+            spacing: Theme.space-xs;
+            SecondaryButton { h: 30px; text: "↑"; clicked => { Browse.home-move(root.data.key, -1); } }
+            SecondaryButton { h: 30px; text: "↓"; clicked => { Browse.home-move(root.data.key, 1); } }
+            SecondaryButton { h: 30px; text: "Hide"; clicked => { Browse.home-hide(root.data.key, true); } }
+        }
+    }
+    if root.data.note != "" : HorizontalLayout {
+        padding-left: Theme.space-2xl;
+        Caption { text: root.data.note; wrap: word-wrap; }
+    }
+    if root.data.cards.length > 0 || root.skeleton : Shelf {
+        model: root.data.cards;
+        art-size: root.art-size;
+        skeleton: root.skeleton;
+        picked(uri) => { Browse.open(uri); }
+        play(uri) => { Browse.play-card(uri); }
+        menu(uri, x, y) => { Browse.card-menu(uri, x, y); }
     }
 }
 
 component HomePage inherits PageFade {
-    VerticalLayout {
-        spacing: 0;
-        PageTitle {
-            title: "Home";
-            status: Browse.status;
-        }
-        Rectangle {
-            vertical-stretch: 1;
-            opacity: Browse.loading ? 0.5 : 1;
-            animate opacity { duration: Theme.duration-normal; easing: Theme.ease; }
-            VerticalLayout {
-                spacing: 0;
-                if Browse.recent.length > 0 : Section {
-                    title: "Recently played";
-                    vertical-stretch: 0;
-                    Shelf {
-                        art-size: 120px;
-                        model: Browse.recent;
-                        picked(uri) => { Browse.open(uri); }
-                    }
+    Rectangle {
+        height: 320px;
+        y: 0;
+        background: @linear-gradient(180deg, Browse.home-tint.with-alpha(0.35) 0%, Theme.bg 100%);
+        animate background { duration: 400ms; }
+    }
+    ScrollView {
+        content-y <=> Browse.scroll-y;
+        VerticalLayout {
+            spacing: 0;
+            HorizontalLayout {
+                padding-right: Theme.space-2xl;
+                PageTitle { title: Browse.greeting; status: Browse.status; }
+                SecondaryButton {
+                    y: Theme.space-xl;
+                    h: 34px;
+                    text: Browse.home-editing ? "Done" : "Customize";
+                    active: Browse.home-editing;
+                    clicked => { Browse.home-editing = !Browse.home-editing; }
                 }
-                if Browse.recent.length > 0 : Rectangle { height: Theme.space-xl; vertical-stretch: 0; }
-                if Browse.playlists.length > 0 : SectionTitle {
-                    title: "Your playlists";
-                    vertical-stretch: 0;
-                }
-                if Browse.playlists.length > 0 : Rectangle { height: Theme.space-md; vertical-stretch: 0; }
-                ListView {
-                    vertical-stretch: 1;
-                    for card in Browse.playlists : PlaylistRow {
-                        card: card;
-                        clicked => { Browse.open(card.uri); }
-                    }
+            }
+            for sh[i] in Browse.shelves : ShelfBlock {
+                data: sh;
+                index: i;
+                art-size: sh.key == "recent" ? 140px : 160px;
+                skeleton: Browse.skeleton;
+                visible: !sh.hidden;
+                height: sh.hidden ? 0px : self.preferred-height;
+            }
+            if Browse.home-editing : VerticalLayout {
+                padding: Theme.space-2xl;
+                spacing: Theme.space-sm;
+                Caption { text: "Hidden sections"; }
+                for sh in Browse.shelves : HorizontalLayout {
+                    visible: sh.hidden;
+                    height: sh.hidden ? 36px : 0px;
+                    spacing: Theme.space-md;
+                    Label { text: sh.title; vertical-alignment: center; }
+                    SecondaryButton { h: 30px; text: "Show"; clicked => { Browse.home-hide(sh.key, false); } }
                 }
             }
         }
@@ -522,7 +409,6 @@ component HomePage inherits PageFade {
 }
 
 component SearchPage inherits PageFade {
-    // Status (searching, signing in) and the no-results note share one line under the field.
     property <string> line: Browse.status != "" ? Browse.status : Browse.search-note;
     VerticalLayout {
         spacing: 0;
@@ -530,189 +416,616 @@ component SearchPage inherits PageFade {
         HorizontalLayout {
             padding-left: Theme.space-2xl;
             padding-right: Theme.space-2xl;
-            Rectangle {
-                height: 56px;
-                border-radius: Theme.radius-control;
-                background: Theme.surface;
-                Label {
-                    x: Theme.space-lg;
-                    y: 0px;
-                    width: parent.width - 2 * Theme.space-lg;
-                    height: parent.height;
-                    vertical-alignment: center;
-                    text: "Search songs, artists, albums";
-                    font-size: Theme.size-heading;
-                    letter-spacing: Theme.tracking-heading;
-                    color: Theme.text-tertiary;
-                    visible: input.text == "";
-                }
-                input := TextInput {
-                    init => { self.focus(); }
-                    x: Theme.space-lg;
-                    y: 0px;
-                    width: parent.width - 2 * Theme.space-lg;
-                    height: parent.height;
-                    vertical-alignment: center;
-                    font-family: Theme.font-family;
-                    font-size: Theme.size-heading;
-                    letter-spacing: Theme.tracking-heading;
-                    color: Theme.text;
-                    selection-background-color: Browse.accent;
-                    selection-foreground-color: Theme.on-accent;
-                    single-line: true;
-                    edited => { Browse.search(self.text); }
-                    accepted => { Browse.search(self.text); }
+            Field {
+                height: 52px;
+                font-size: Theme.size-heading;
+                placeholder: "What do you want to play? (or paste a Spotify link)";
+                auto-focus: true;
+                text <=> Browse.query;
+                edited(t) => { Browse.search-sel = -1; Browse.search(t); }
+                accepted => { Browse.search-enter(); }
+                key(e) => {
+                    if (e.text == Key.DownArrow) {
+                        Browse.search-sel = Math.min(Browse.search-sel + 1, Browse.found-tracks.length - 1);
+                        return accept;
+                    }
+                    if (e.text == Key.UpArrow) {
+                        Browse.search-sel = Math.max(Browse.search-sel - 1, -1);
+                        return accept;
+                    }
+                    if (e.text == Key.Escape && Browse.query != "") {
+                        Browse.query = "";
+                        Browse.search("");
+                        return accept;
+                    }
+                    return reject;
                 }
             }
         }
-        Rectangle { height: Theme.space-xl; vertical-stretch: 0; }
+        Rectangle { height: Theme.space-lg; vertical-stretch: 0; }
         ScrollView {
             vertical-stretch: 1;
+            content-y <=> Browse.scroll-y;
             VerticalLayout {
-                spacing: Theme.space-2xl;
+                spacing: Theme.space-xl;
                 padding-bottom: Theme.space-2xl;
-                opacity: Browse.loading ? 0.5 : 1;
-                animate opacity { duration: Theme.duration-normal; easing: Theme.ease; }
+                opacity: Browse.loading ? 0.6 : 1;
                 if root.line != "" : HorizontalLayout {
                     padding-left: Theme.space-2xl;
-                    Label {
-                        text: root.line;
-                        color: Theme.text-secondary;
-                    }
+                    Label { text: root.line; color: Theme.text-secondary; }
                 }
-                if Browse.found-tracks.length > 0 : Section {
-                    title: "Tracks";
-                    VerticalLayout {
-                        for t[i] in Browse.found-tracks : TrackItem {
-                            item: t;
-                            index: i;
-                            clicked => { Browse.play(t.uri, 0); }
+                // History when the field is empty.
+                if Browse.query == "" && Browse.history.length > 0 : VerticalLayout {
+                    spacing: Theme.space-sm;
+                    HorizontalLayout {
+                        padding-right: Theme.space-2xl;
+                        SectionTitle { title: "Recent searches"; }
+                        SecondaryButton { h: 30px; text: "Clear"; clicked => { Browse.history-clear(); } }
+                    }
+                    for h in Browse.history : Rectangle {
+                        height: 40px;
+                        Rectangle {
+                            x: Theme.space-xl;
+                            width: parent.width - 2 * Theme.space-xl;
+                            border-radius: Theme.radius-control;
+                            background: hta.has-hover ? Theme.hover : transparent;
+                        }
+                        Glyph { x: Theme.space-2xl; y: 11px; commands: Icons.search; }
+                        Label { x: Theme.space-2xl + 30px; height: parent.height; vertical-alignment: center; text: h; }
+                        hta := TouchArea { clicked => { Browse.history-pick(h); } }
+                        RoundIcon {
+                            x: parent.width - Theme.space-2xl - 32px;
+                            y: 4px;
+                            width: 32px; height: 32px;
+                            icon: Icons.close;
+                            clicked => { Browse.history-remove(h); }
                         }
                     }
                 }
-                if Browse.found-artists.length > 0 : Section {
-                    title: "Artists";
-                    Shelf {
-                        model: Browse.found-artists;
-                        round: true;
-                        picked(uri) => { Browse.open(uri); }
+                if Browse.has-top || Browse.found-tracks.length > 0 : HorizontalLayout {
+                    padding-left: Theme.space-2xl;
+                    padding-right: Theme.space-2xl;
+                    spacing: Theme.space-xl;
+                    if Browse.has-top : VerticalLayout {
+                        width: 340px;
+                        spacing: Theme.space-md;
+                        Label { text: "Top result"; font-size: Theme.size-heading; font-weight: Theme.weight-semibold; }
+                        Rectangle {
+                            height: 220px;
+                            border-radius: Theme.radius-card;
+                            background: top-ta.has-hover ? Theme.surface-raised : Theme.surface;
+                            ArtTile {
+                                x: Theme.space-xl; y: Theme.space-xl;
+                                width: 96px; height: 96px;
+                                radius: Browse.top.round ? 48px : Theme.radius-thumb;
+                                backdrop: top-ta.has-hover ? Theme.surface-raised : Theme.surface;
+                                source: Browse.top.art;
+                            }
+                            Label {
+                                x: Theme.space-xl; y: 136px;
+                                width: parent.width - 2 * Theme.space-xl;
+                                text: Browse.top.title;
+                                font-size: Theme.size-title;
+                                font-weight: Theme.weight-bold;
+                                letter-spacing: Theme.tracking-title;
+                            }
+                            Caption { x: Theme.space-xl; y: 180px; width: parent.width - 100px; text: Browse.top.subtitle; }
+                            top-ta := TouchArea { clicked => { Browse.open(Browse.top.uri); } }
+                            Rectangle {
+                                x: parent.width - 64px; y: parent.height - 64px;
+                                width: 48px; height: 48px; border-radius: 24px;
+                                background: Theme.accent;
+                                opacity: top-ta.has-hover || tp.has-hover ? 1 : 0;
+                                Glyph { x: 14px; y: 13px; size: 22px; solid: true; tint: Theme.on-accent; commands: Icons.play; }
+                                tp := TouchArea { clicked => { Browse.play-card(Browse.top.uri); } }
+                            }
+                        }
+                    }
+                    if Browse.found-tracks.length > 0 : VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: Theme.space-md;
+                        HorizontalLayout {
+                            Label { text: "Songs"; font-size: Theme.size-heading; font-weight: Theme.weight-semibold; }
+                            Rectangle {
+                                width: sa.preferred-width;
+                                sa := Caption { height: parent.height; vertical-alignment: center; text: "Show all"; font-weight: Theme.weight-semibold; }
+                                TouchArea { clicked => { Browse.open("showall:track:" + Browse.query); } }
+                            }
+                        }
+                        for t[i] in Browse.found-tracks : TrackItem {
+                            item: t;
+                            number: 0;
+                            show-album: false;
+                            show-heart: false;
+                            selected: Browse.search-sel == i;
+                            playing: t.uri == Browse.current-uri;
+                            clicked => { Browse.search-sel = i; }
+                            double-clicked => { Browse.play(t.uri, 0); }
+                            menu(x, y) => { Menu.for-item(t.uri, "", -1, "", x, y); }
+                        }
                     }
                 }
-                if Browse.found-albums.length > 0 : Section {
-                    title: "Albums";
-                    Shelf {
-                        model: Browse.found-albums;
-                        picked(uri) => { Browse.open(uri); }
+                for sh in Browse.found-shelves : VerticalLayout {
+                    spacing: Theme.space-md;
+                    SectionTitle {
+                        title: sh.title;
+                        more: sh.more != "" ? "Show all" : "";
+                        more-clicked => { Browse.open(sh.more); }
                     }
-                }
-                if Browse.found-playlists.length > 0 : Section {
-                    title: "Playlists";
                     Shelf {
-                        model: Browse.found-playlists;
+                        model: sh.cards;
                         picked(uri) => { Browse.open(uri); }
+                        play(uri) => { Browse.play-card(uri); }
+                        menu(uri, x, y) => { Browse.card-menu(uri, x, y); }
                     }
                 }
             }
         }
+    }
+}
+
+component LibRow inherits Rectangle {
+    in property <Card> card;
+    callback clicked();
+    height: Browse.compact ? 48px : 68px;
+    property <length> art: Browse.compact ? 36px : 52px;
+    property <color> behind: ta.pressed ? Theme.text.mix(Theme.bg, 0.12) : (ta.has-hover ? Theme.text.mix(Theme.bg, 0.06) : Theme.bg);
+    Rectangle {
+        x: Theme.space-xl;
+        width: parent.width - 2 * Theme.space-xl;
+        border-radius: Theme.radius-control;
+        background: ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent);
+    }
+    ArtTile {
+        x: Theme.space-xl + Theme.space-sm;
+        y: (parent.height - self.height) / 2;
+        width: root.art;
+        height: root.art;
+        radius: root.card.round ? root.art / 2 : Theme.radius-small;
+        backdrop: root.behind;
+        source: root.card.art;
+        liked: root.card.liked;
+        local: root.card.local;
+    }
+    VerticalLayout {
+        x: Theme.space-xl + Theme.space-sm + root.art + Theme.space-lg;
+        width: parent.width - self.x - Theme.space-xl - Theme.space-lg - 60px;
+        alignment: center;
+        spacing: 2px;
+        Label { text: root.card.title; font-weight: Theme.weight-medium; }
+        Caption { text: (root.card.local ? "Local folder · " : "") + root.card.subtitle; }
+    }
+    if root.card.pinned : Glyph {
+        x: parent.width - Theme.space-xl - 32px;
+        y: (parent.height - self.height) / 2;
+        size: 14px;
+        commands: Icons.pin;
+        tint: Theme.accent;
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                Browse.card-menu(root.card.uri, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+}
+
+component LibraryPage inherits PageFade {
+    VerticalLayout {
+        spacing: 0;
+        HorizontalLayout {
+            padding-right: Theme.space-2xl;
+            PageTitle { title: "Your Library"; status: Browse.status; }
+            PrimaryButton { y: Theme.space-xl + 4px; text: "Create playlist"; clicked => { Browse.create-playlist(); } }
+        }
+        HorizontalLayout {
+            padding-left: Theme.space-2xl;
+            padding-right: Theme.space-2xl;
+            spacing: Theme.space-sm;
+            height: 32px;
+            Chip { text: "Playlists"; selected: Browse.lib-tab == "playlist"; clicked => { Browse.lib-tab = "playlist"; Browse.lib-changed(); } }
+            Chip { text: "Albums"; selected: Browse.lib-tab == "album"; clicked => { Browse.lib-tab = "album"; Browse.lib-changed(); } }
+            Chip { text: "Artists"; selected: Browse.lib-tab == "artist"; clicked => { Browse.lib-tab = "artist"; Browse.lib-changed(); } }
+            Chip { text: "Podcasts"; selected: Browse.lib-tab == "show"; clicked => { Browse.lib-tab = "show"; Browse.lib-changed(); } }
+            Chip { text: "Liked Songs"; selected: Browse.lib-tab == "track"; clicked => { Browse.lib-tab = "track"; Browse.lib-changed(); } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        HorizontalLayout {
+            padding: Theme.space-2xl;
+            padding-top: Theme.space-lg;
+            padding-bottom: Theme.space-md;
+            spacing: Theme.space-sm;
+            Field {
+                placeholder: "Search in Your Library";
+                text <=> Browse.lib-filter;
+                edited => { Browse.lib-changed(); }
+            }
+            Chip { text: "Recents"; selected: Browse.lib-sort == "recent"; clicked => { Browse.lib-sort = "recent"; Browse.lib-changed(); } }
+            Chip { text: "Alphabetical"; selected: Browse.lib-sort == "alpha"; clicked => { Browse.lib-sort = "alpha"; Browse.lib-changed(); } }
+            Chip { text: "Creator"; selected: Browse.lib-sort == "creator"; clicked => { Browse.lib-sort = "creator"; Browse.lib-changed(); } }
+        }
+        if Browse.lib-note != "" : HorizontalLayout {
+            padding-left: Theme.space-2xl;
+            padding-bottom: Theme.space-md;
+            Caption { text: Browse.lib-note; wrap: word-wrap; }
+        }
+        ListView {
+            vertical-stretch: 1;
+            content-y <=> Browse.scroll-y;
+            for c in Browse.lib-items : LibRow {
+                card: c;
+                clicked => { Browse.open(c.uri); }
+            }
+        }
+    }
+}
+
+component ListHeader inherits HorizontalLayout {
+    property <length> art-size: 176px;
+    padding: Theme.space-2xl;
+    padding-bottom: Theme.space-lg;
+    spacing: Theme.space-xl;
+    if Browse.list-kind != "showall" : ArtTile {
+        width: root.art-size;
+        height: root.art-size;
+        radius: Browse.list-round ? root.art-size / 2 : Theme.radius-art;
+        source: Browse.list-art;
+        liked: Browse.list-kind == "liked";
+        local: Browse.list-kind == "local" || Browse.list-kind == "folder";
+    }
+    VerticalLayout {
+        horizontal-stretch: 1;
+        alignment: end;
+        spacing: Theme.space-sm;
+        Label { text: Browse.list-type; color: Theme.text-secondary; font-weight: Theme.weight-medium; }
+        Label {
+            text: Browse.list-title;
+            font-size: Theme.size-title + 8px;
+            font-weight: Theme.weight-bold;
+            letter-spacing: Theme.tracking-title;
+        }
+        if Browse.list-desc != "" : Label {
+            text: Browse.list-desc;
+            color: Theme.text-secondary;
+            wrap: word-wrap;
+            max-height: 44px;
+            overflow: elide;
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            if Browse.list-owner != "" : Rectangle {
+                width: own.preferred-width;
+                own := Label { height: parent.height; text: Browse.list-owner; font-weight: Theme.weight-semibold; color: oa.has-hover ? Theme.text : Theme.text; }
+                oa := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { Browse.open-owner(); } }
+            }
+            if Browse.list-owner != "" && Browse.list-meta != "" : Label { text: "·"; color: Theme.text-secondary; }
+            Label { text: Browse.list-meta; color: Theme.text-secondary; horizontal-stretch: 1; }
+        }
+        Rectangle { height: Theme.space-sm; }
+        HorizontalLayout {
+            alignment: start;
+            spacing: Theme.space-sm;
+            if Browse.list-playable : PrimaryButton { text: "Play"; clicked => { Browse.play-all(Browse.list-uri, false); } }
+            if Browse.list-playable : SecondaryButton { text: "Shuffle"; clicked => { Browse.play-all(Browse.list-uri, true); } }
+            if Browse.list-can-save : RoundIcon {
+                icon: Icons.heart;
+                solid: Browse.list-saved;
+                tint: Browse.list-saved ? Theme.accent : Theme.text-secondary;
+                clicked => { Browse.toggle-save(); }
+            }
+            if Browse.list-kind != "showall" && Browse.list-kind != "artist-liked" : RoundIcon {
+                icon: Icons.more;
+                clicked(x, y) => { Browse.list-menu(x, y); }
+            }
+            if Browse.list-editable && Browse.list-kind == "playlist" : SecondaryButton {
+                text: Browse.find-open ? "Back to songs" : "Add songs";
+                active: Browse.find-open;
+                clicked => { Browse.find-open = !Browse.find-open; }
+            }
+        }
+    }
+}
+
+component FindSection inherits VerticalLayout {
+    spacing: Theme.space-md;
+    padding-top: Theme.space-md;
+    padding-bottom: Theme.space-2xl;
+    SectionTitle { title: "Let's find something for your playlist"; }
+    HorizontalLayout {
+        padding-left: Theme.space-2xl;
+        padding-right: Theme.space-2xl;
+        Field {
+            auto-focus: true;
+            placeholder: "Search for songs, artists or albums";
+            edited(t) => { Browse.find(t); }
+            accepted(t) => { Browse.find(t); }
+        }
+    }
+    if Browse.find-note != "" : HorizontalLayout {
+        padding-left: Theme.space-2xl;
+        Caption { text: Browse.find-note; }
+    }
+    if Browse.find-cards.length > 0 : HorizontalLayout {
+        padding-left: Theme.space-2xl;
+        spacing: Theme.space-sm;
+        alignment: start;
+        for c in Browse.find-cards : Chip {
+            text: (c.round ? "Artist: " : "Album: ") + c.title;
+            selected: Browse.find-expanded == c.uri;
+            clicked => { Browse.find-expand(c.uri); }
+        }
+    }
+    for t[i] in Browse.find-tracks : TrackItem {
+        item: t;
+        number: 0;
+        show-heart: false;
+        action-label: "Add";
+        double-clicked => { Browse.play(t.uri, 0); }
+        action => { Browse.find-add(i); }
+        menu(x, y) => { Menu.for-item(t.uri, "", -1, "", x, y); }
     }
 }
 
 component ListPage inherits PageFade {
-    property <bool> is-artist: Browse.list-kind == "artist";
-    property <length> art-size: 232px;
+    property <bool> episodes: Browse.list-kind == "show";
+    property <bool> with-added: Browse.list-kind == "playlist" || Browse.list-kind == "liked";
+    property <bool> with-album: Browse.list-kind != "album" && !root.episodes;
     property <string> line: Browse.status != "" ? Browse.status : Browse.list-note;
+    property <bool> card-page: Browse.list-cards.length > 0;
+    property <bool> finding: Browse.find-open && Browse.list-editable && Browse.list-kind == "playlist";
     VerticalLayout {
-        HorizontalLayout {
-            padding: Theme.space-2xl;
-            padding-bottom: Theme.space-xl;
-            spacing: Theme.space-xl;
-            ArtTile {
-                width: root.art-size;
-                height: root.art-size;
-                radius: root.is-artist ? root.art-size / 2 : Theme.radius-art;
-                source: Browse.list-art;
-                liked: Browse.list-kind == "liked";
-            }
-            VerticalLayout {
-                horizontal-stretch: 1;
-                alignment: end;
-                spacing: Theme.space-sm;
-                Label {
-                    text: Browse.list-kind == "album" ? "Album" : (root.is-artist ? "Artist" : "Playlist");
-                    color: Theme.text-secondary;
-                    font-weight: Theme.weight-medium;
-                }
-                Label {
-                    text: Browse.list-title;
-                    font-size: Theme.size-display;
-                    font-weight: Theme.weight-bold;
-                    letter-spacing: Theme.tracking-display;
-                }
-                Label {
-                    text: Browse.list-meta;
-                    color: Theme.text-secondary;
-                }
-                Rectangle { height: Theme.space-sm; }
-                HorizontalLayout {
-                    alignment: start;
-                    Rectangle {
-                        width: 112px;
-                        height: 44px;
-                        border-radius: Theme.radius-control;
-                        background: play-ta.pressed ? Theme.text-secondary : (play-ta.has-hover ? #ffffff : Theme.text);
-                        animate background { duration: Theme.duration-fast; }
-                        Label {
-                            width: parent.width;
-                            y: (parent.height - self.height) / 2;
-                            text: "Play";
-                            horizontal-alignment: center;
-                            font-weight: Theme.weight-semibold;
-                            color: Theme.bg;
-                        }
-                        play-ta := TouchArea {
-                            clicked => { Browse.play(Browse.list-uri, 0); }
-                        }
-                    }
-                }
-            }
-        }
+        ListHeader { vertical-stretch: 0; }
         if root.line != "" : HorizontalLayout {
             padding-left: Theme.space-2xl;
             padding-right: Theme.space-2xl;
-            Label {
-                text: root.line;
-                color: Theme.text-secondary;
-                wrap: word-wrap;
-                overflow: clip;
-            }
+            padding-bottom: Theme.space-md;
+            Label { text: root.line; color: Theme.text-secondary; wrap: word-wrap; }
         }
-        ListView {
+        if !root.finding && Browse.tracks.length > 0 : TableHeader {
+            show-album: root.with-album;
+            show-added: root.with-added;
+            show-heart: !root.episodes && Browse.list-kind != "local";
+            sort-key: Browse.sort-key;
+            sort-desc: Browse.sort-desc;
+            sortable: Browse.list-kind == "playlist" || Browse.list-kind == "liked" || Browse.list-kind == "local";
+            sort(k) => { Browse.sort-by(k); }
+        }
+        if !root.finding && !root.card-page : ListView {
             vertical-stretch: 1;
-            opacity: Browse.loading ? 0.5 : 1;
-            animate opacity { duration: Theme.duration-normal; easing: Theme.ease; }
+            content-y <=> Browse.scroll-y;
             for t[i] in Browse.tracks : TrackItem {
                 item: t;
-                index: i;
-                clicked => {
-                    if (root.is-artist) {
-                        Browse.open(t.uri);
-                    } else {
-                        Browse.play(Browse.list-uri, i);
-                    }
+                number: i + 1;
+                show-album: root.with-album;
+                show-added: root.with-added;
+                show-heart: !root.episodes && Browse.list-kind != "local";
+                playing: t.uri != "" && t.uri == Browse.current-uri;
+                double-clicked => { Browse.play(Browse.list-uri, i); }
+                heart => { Browse.track-heart(i); }
+                menu(x, y) => { Menu.for-item(t.uri, Browse.list-uri, i, "", x, y); }
+            }
+        }
+        if !root.finding && root.card-page : ScrollView {
+            vertical-stretch: 1;
+            content-y <=> Browse.scroll-y;
+            Rectangle {
+                property <int> cols: Math.max(1, Math.floor((root.width - 2 * Theme.space-2xl + Theme.space-lg) / 176px));
+                height: Math.ceil(Browse.list-cards.length / self.cols) * 220px + Theme.space-2xl;
+                for c[i] in Browse.list-cards : CardView {
+                    x: Theme.space-2xl + Math.mod(i, parent.cols) * 176px;
+                    y: Math.floor(i / parent.cols) * 220px;
+                    card: c;
+                    clicked => { Browse.open(c.uri); }
+                    play => { Browse.play-card(c.uri); }
+                    menu(x, y) => { Browse.card-menu(c.uri, x, y); }
                 }
+            }
+        }
+        if root.finding : ScrollView {
+            vertical-stretch: 1;
+            FindSection { }
+        }
+        if Browse.list-more && !root.finding : HorizontalLayout {
+            padding: Theme.space-md;
+            alignment: center;
+            vertical-stretch: 0;
+            SecondaryButton { h: 36px; text: "Load more"; clicked => { Browse.load-more(); } }
+        }
+    }
+}
+
+component ArtistPage inherits PageFade {
+    ScrollView {
+      content-y <=> Browse.scroll-y;
+      VerticalLayout {
+        HorizontalLayout {
+            padding: Theme.space-2xl;
+            padding-bottom: Theme.space-lg;
+            spacing: Theme.space-xl;
+            ArtTile { width: 216px; height: 216px; radius: 108px; source: Browse.list-art; }
+            VerticalLayout {
+                alignment: end;
+                spacing: Theme.space-sm;
+                horizontal-stretch: 1;
+                Label { text: "Artist"; color: Theme.text-secondary; font-weight: Theme.weight-medium; }
+                Label { text: Browse.list-title; font-size: Theme.size-display; font-weight: Theme.weight-bold; letter-spacing: Theme.tracking-display; }
+                Rectangle { height: Theme.space-sm; }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: Theme.space-sm;
+                    PrimaryButton { text: "Play"; clicked => { Browse.play-all(Browse.list-uri, false); } }
+                    SecondaryButton { text: "Shuffle"; clicked => { Browse.play-all(Browse.list-uri, true); } }
+                    SecondaryButton { text: Browse.following ? "Following" : "Follow"; active: Browse.following; clicked => { Browse.toggle-follow(); } }
+                    RoundIcon { icon: Icons.more; clicked(x, y) => { Browse.list-menu(x, y); } }
+                }
+            }
+        }
+        if Browse.status != "" : HorizontalLayout {
+            padding-left: Theme.space-2xl;
+            Label { text: Browse.status; color: Theme.text-secondary; }
+        }
+        if Browse.liked-note != "" : HorizontalLayout {
+            padding-left: Theme.space-2xl;
+            padding-bottom: Theme.space-lg;
+            Rectangle {
+                width: 320px;
+                height: 64px;
+                border-radius: Theme.radius-card;
+                background: lta.has-hover ? Theme.surface-raised : Theme.surface;
+                Glyph { x: Theme.space-lg; y: 21px; size: 22px; solid: true; tint: Theme.accent; commands: Icons.heart; }
+                VerticalLayout {
+                    x: 56px;
+                    alignment: center;
+                    Label { text: "Liked songs"; font-weight: Theme.weight-semibold; }
+                    Caption { text: Browse.liked-note; }
+                }
+                lta := TouchArea { clicked => { Browse.open-artist-liked(); } }
+            }
+        }
+        SectionTitle { title: Browse.popular-title; }
+        if Browse.popular-note != "" : HorizontalLayout {
+            padding-left: Theme.space-2xl;
+            Caption { text: Browse.popular-note; wrap: word-wrap; }
+        }
+        for t[i] in Browse.popular : TrackItem {
+            item: t;
+            number: i + 1;
+            show-album: true;
+            playing: t.uri == Browse.current-uri;
+            double-clicked => { Browse.play("popular", i); }
+            heart => { Browse.track-heart(-1 - i); }
+            menu(x, y) => { Menu.for-item(t.uri, "", -1, "", x, y); }
+        }
+        Rectangle { height: Theme.space-xl; }
+        SectionTitle { title: "Discography"; }
+        HorizontalLayout {
+            padding-left: Theme.space-2xl;
+            padding-top: Theme.space-sm;
+            padding-bottom: Theme.space-md;
+            spacing: Theme.space-sm;
+            alignment: start;
+            Chip { text: "All"; selected: Browse.disc-filter == "all"; clicked => { Browse.set-disc-filter("all"); } }
+            Chip { text: "Albums"; selected: Browse.disc-filter == "album"; clicked => { Browse.set-disc-filter("album"); } }
+            Chip { text: "Singles and EPs"; selected: Browse.disc-filter == "single"; clicked => { Browse.set-disc-filter("single"); } }
+            Chip { text: "Compilations"; selected: Browse.disc-filter == "compilation"; clicked => { Browse.set-disc-filter("compilation"); } }
+        }
+        Rectangle {
+            property <int> cols: Math.max(1, Math.floor((root.width - 2 * Theme.space-2xl + Theme.space-lg) / 176px));
+            height: Math.ceil(Browse.disc.length / self.cols) * 220px;
+            for c[i] in Browse.disc : CardView {
+                x: Theme.space-2xl + Math.mod(i, parent.cols) * 176px;
+                y: Math.floor(i / parent.cols) * 220px;
+                card: c;
+                clicked => { Browse.open(c.uri); }
+                play => { Browse.play-card(c.uri); }
+                menu(x, y) => { Browse.card-menu(c.uri, x, y); }
+            }
+        }
+        if Browse.list-more : HorizontalLayout {
+            padding: Theme.space-xl;
+            alignment: center;
+            SecondaryButton { text: "Load more"; clicked => { Browse.load-more(); } }
+        }
+        Rectangle { height: Theme.space-2xl; }
+      }
+    }
+}
+
+component StatList inherits VerticalLayout {
+    in property <string> title;
+    in property <[StatRow]> rows;
+    spacing: 0;
+    horizontal-stretch: 1;
+    Label { text: root.title; font-size: Theme.size-heading; font-weight: Theme.weight-semibold; height: 40px; }
+    if root.rows.length == 0 : Caption { text: "Nothing yet."; height: 28px; }
+    for r in root.rows : Rectangle {
+        height: 44px;
+        Rectangle { border-radius: Theme.radius-small; background: ta.has-hover && r.uri != "" ? Theme.hover : transparent; }
+        Label { x: 4px; width: 28px; height: parent.height; vertical-alignment: center; text: "\{r.rank}"; color: Theme.text-tertiary; }
+        VerticalLayout {
+            x: 36px;
+            width: parent.width - 36px - 80px;
+            alignment: center;
+            Label { text: r.title; font-weight: Theme.weight-medium; }
+            if r.subtitle != "" : Caption { text: r.subtitle; }
+        }
+        Caption { x: parent.width - 80px; width: 76px; height: parent.height; vertical-alignment: center; horizontal-alignment: right; text: r.value; }
+        ta := TouchArea { clicked => { if (r.uri != "") { Browse.open(r.uri); } } }
+    }
+}
+
+component StatsPage inherits PageFade {
+    ScrollView {
+        content-y <=> Browse.scroll-y;
+        VerticalLayout {
+            alignment: start;
+            PageTitle { title: "Listening stats"; status: "Counts only what Cadence played on this PC. Private session pauses recording."; }
+            HorizontalLayout {
+                padding-left: Theme.space-2xl;
+                padding-right: Theme.space-2xl;
+                spacing: Theme.space-sm;
+                height: 32px;
+                Chip { text: "4 weeks"; selected: Browse.stats-range == "4w"; clicked => { Browse.stats-range = "4w"; Browse.stats-changed(); } }
+                Chip { text: "6 months"; selected: Browse.stats-range == "6m"; clicked => { Browse.stats-range = "6m"; Browse.stats-changed(); } }
+                Chip { text: "All time"; selected: Browse.stats-range == "all"; clicked => { Browse.stats-range = "all"; Browse.stats-changed(); } }
+                Rectangle { horizontal-stretch: 1; }
+                SecondaryButton { h: 32px; text: "Clear listening history"; clicked => { Browse.stats-clear(); } }
+            }
+            HorizontalLayout {
+                padding: Theme.space-2xl;
+                padding-bottom: Theme.space-md;
+                Label { text: Browse.stats-summary; font-size: Theme.size-heading; }
+            }
+            HorizontalLayout {
+                padding-left: Theme.space-2xl;
+                padding-right: Theme.space-2xl;
+                padding-bottom: Theme.space-2xl;
+                spacing: Theme.space-2xl;
+                alignment: stretch;
+                StatList { title: "Top songs"; rows: Browse.stat-songs; }
+                StatList { title: "Top artists"; rows: Browse.stat-artists; }
+                StatList { title: "Top albums"; rows: Browse.stat-albums; }
             }
         }
     }
 }
 
-// Fills its parent; leave the bottom to the now-playing bar.
+component ProfilePage inherits PageFade {
+    VerticalLayout {
+        PageTitle { title: "Cadence profile"; status: "Stored only on this PC. Spotify doesn't let apps edit your Spotify profile."; }
+        HorizontalLayout {
+            padding: Theme.space-2xl;
+            spacing: Theme.space-2xl;
+            alignment: start;
+            VerticalLayout {
+                spacing: Theme.space-md;
+                ArtTile { width: 160px; height: 160px; radius: 80px; source: Browse.profile-pic; }
+                SecondaryButton { h: 36px; text: "Choose picture…"; clicked => { Browse.profile-pick(); } }
+            }
+            VerticalLayout {
+                width: 420px;
+                spacing: Theme.space-sm;
+                Caption { text: "Display name"; }
+                Field { text <=> Browse.profile-name; placeholder: "Your name"; }
+                Rectangle { height: Theme.space-sm; }
+                Caption { text: "Bio"; }
+                Field { height: 120px; single-line: false; text <=> Browse.profile-bio; placeholder: "A few words"; }
+                Rectangle { height: Theme.space-md; }
+                HorizontalLayout { alignment: start; PrimaryButton { text: "Save"; clicked => { Browse.profile-save(); } } }
+            }
+        }
+        Rectangle { vertical-stretch: 1; }
+    }
+}
+
+// Fills its parent; the bottom belongs to the now-playing bar.
 export component BrowseArea inherits Rectangle {
     background: Theme.bg;
     clip: true;
     init => { Palette.color-scheme = ColorScheme.dark; }
-
     property <length> error-h: Browse.error != "" ? 36px : 0px;
-
     Rectangle {
         x: 0px;
         y: 0px;
@@ -720,8 +1033,14 @@ export component BrowseArea inherits Rectangle {
         height: parent.height - root.error-h;
         if Browse.page == "home" : HomePage { }
         if Browse.page == "search" : SearchPage { }
+        if Browse.page == "library" : LibraryPage { }
         if Browse.page == "list" && !Browse.flip : ListPage { }
         if Browse.page == "list" && Browse.flip : ListPage { }
+        if Browse.page == "artist" && !Browse.flip : ArtistPage { }
+        if Browse.page == "artist" && Browse.flip : ArtistPage { }
+        if Browse.page == "stats" : StatsPage { }
+        if Browse.page == "profile" : ProfilePage { }
+        @children
     }
     if Browse.error != "" : Label {
         x: Theme.space-2xl;

@@ -28,8 +28,16 @@ static BODIES: Mutex<Vec<(String, Arc<OnceCell<Body>>)>> = Mutex::new(Vec::new()
 
 /// Smallest image whose width is >= `px`, else the largest. Images without a size (user
 /// playlists) count as 0 wide, so ties resolve to the first entry, which Spotify lists largest.
-pub fn pick_url(images: &[rspotify::model::Image], px: u32) -> Option<String> {
-    let w = |i: &&rspotify::model::Image| i.width.or(i.height).unwrap_or(0);
+/// A Spotify image entry.
+#[derive(Clone, Debug, Default)]
+pub struct SpImage {
+    pub url: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+pub fn pick_url(images: &[SpImage], px: u32) -> Option<String> {
+    let w = |i: &&SpImage| i.width.or(i.height).unwrap_or(0);
     images
         .iter()
         .filter(|i| w(i) >= px)
@@ -364,4 +372,119 @@ pub fn karaoke_bg(r: u8, g: u8, b: u8) -> SharedPixelBuffer<Rgb8Pixel> {
         *o = Rgb8Pixel { r: ch(5.0, r), g: ch(5.0, g), b: ch(7.0, b) };
     }
     out
+}
+
+// ---------------------------------------------------------------------------------------------
+// Local images (profile picture, playlist cover upload, local-file artwork).
+
+/// Decodes JPEG or PNG bytes to a square RGB image `px` wide (center crop, box downscale).
+pub fn decode_square(data: &[u8], px: u32) -> Option<SharedPixelBuffer<Rgb8Pixel>> {
+    if data.starts_with(&[0xFF, 0xD8]) {
+        return decode(data, px).ok().map(|a| a.buf);
+    }
+    let dec = png::Decoder::new(std::io::Cursor::new(data));
+    let mut reader = dec.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    let ch = match info.color_type {
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        png::ColorType::Grayscale => 1,
+        png::ColorType::GrayscaleAlpha => 2,
+        _ => return None,
+    };
+    if info.bit_depth != png::BitDepth::Eight || w == 0 || h == 0 {
+        return None;
+    }
+    let side = w.min(h);
+    let (ox, oy) = ((w - side) / 2, (h - side) / 2);
+    let px = px as usize;
+    let mut out = SharedPixelBuffer::<Rgb8Pixel>::new(px as u32, px as u32);
+    let dst = out.make_mut_slice();
+    for y in 0..px {
+        for x in 0..px {
+            // Box filter over the source area this pixel covers.
+            let (x0, x1) = (ox + x * side / px, ox + ((x + 1) * side / px).max(x * side / px + 1));
+            let (y0, y1) = (oy + y * side / px, oy + ((y + 1) * side / px).max(y * side / px + 1));
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for sy in y0..y1.min(h) {
+                for sx in x0..x1.min(w) {
+                    let i = (sy * w + sx) * ch;
+                    let (pr, pg, pb) = if ch >= 3 { (buf[i], buf[i + 1], buf[i + 2]) } else { (buf[i], buf[i], buf[i]) };
+                    r += pr as u32;
+                    g += pg as u32;
+                    b += pb as u32;
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            dst[y * px + x] = Rgb8Pixel { r: (r / n) as u8, g: (g / n) as u8, b: (b / n) as u8 };
+        }
+    }
+    Some(out)
+}
+
+/// A square PNG copy of an image file (profile picture).
+pub fn save_square_png(src: &std::path::Path, dst: &std::path::Path, px: u32) -> bool {
+    let Ok(data) = std::fs::read(src) else { return false };
+    let Some(img) = decode_square(&data, px) else { return false };
+    let Ok(file) = std::fs::File::create(dst) else { return false };
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), img.width(), img.height());
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().and_then(|mut w| w.write_image_data(img.as_bytes())).is_ok()
+}
+
+/// A playlist cover from an image file: square JPEG under Spotify's 256 KB limit (as base64,
+/// which is how the upload endpoint wants it), plus a preview.
+pub fn cover_jpeg_base64(src: &std::path::Path) -> Option<(Vec<u8>, SharedPixelBuffer<Rgb8Pixel>)> {
+    use base64::Engine;
+    let data = std::fs::read(src).ok()?;
+    for (px, q) in [(640u32, 85u8), (512, 80), (400, 75), (300, 70)] {
+        let img = decode_square(&data, px)?;
+        let mut jpg = Vec::new();
+        let enc = jpeg_encoder::Encoder::new(&mut jpg, q);
+        enc.encode(img.as_bytes(), px as u16, px as u16, jpeg_encoder::ColorType::Rgb).ok()?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&jpg).into_bytes();
+        if b64.len() <= 256 * 1024 {
+            return Some((b64, decode_square(&data, 112)?));
+        }
+    }
+    None
+}
+
+/// Box-downscales a square image to `px`.
+pub fn decode_rescale(src: &SharedPixelBuffer<Rgb8Pixel>, px: u32) -> SharedPixelBuffer<Rgb8Pixel> {
+    let (sw, px) = (src.width() as usize, px.max(1) as usize);
+    let s = src.as_slice();
+    let mut out = SharedPixelBuffer::<Rgb8Pixel>::new(px as u32, px as u32);
+    let d = out.make_mut_slice();
+    for y in 0..px {
+        for x in 0..px {
+            let (x0, x1) = (x * sw / px, ((x + 1) * sw / px).max(x * sw / px + 1).min(sw));
+            let (y0, y1) = (y * sw / px, ((y + 1) * sw / px).max(y * sw / px + 1).min(sw));
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let p = s[sy * sw + sx];
+                    r += p.r as u32;
+                    g += p.g as u32;
+                    b += p.b as u32;
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            d[y * px + x] = Rgb8Pixel { r: (r / n) as u8, g: (g / n) as u8, b: (b / n) as u8 };
+        }
+    }
+    out
+}
+
+pub fn save_rgb_png(buf: &SharedPixelBuffer<Rgb8Pixel>, path: &std::path::Path) -> bool {
+    let Ok(file) = std::fs::File::create(path) else { return false };
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), buf.width(), buf.height());
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().and_then(|mut w| w.write_image_data(buf.as_bytes())).is_ok()
 }

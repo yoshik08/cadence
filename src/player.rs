@@ -14,14 +14,13 @@ use librespot_core::{
 use serde_json::Value;
 use librespot_metadata::{artist::ArtistRole, audio::UniqueFields};
 use librespot_playback::{
-    audio_backend,
-    config::{AudioFormat, PlayerConfig},
+    config::PlayerConfig,
     mixer::{self, Mixer, MixerConfig},
     player::{Player as LsPlayer, PlayerEvent},
 };
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicBool, AtomicU16, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering},
 };
 use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -35,13 +34,15 @@ pub enum Event {
         album: String,
         art_url: Option<String>,
         duration_ms: u32,
+        explicit: bool,
     },
     Playing { position_ms: u32 },
     Paused { position_ms: u32 },
     Stopped,
     Volume(f32 /*0..1*/),
     Shuffle(bool),
-    Repeat(bool),
+    /// 0 off, 1 all (context), 2 one (track).
+    Repeat(u8),
     Error(String),
 }
 
@@ -53,8 +54,10 @@ pub struct Player {
     // Last known shuffle/repeat/volume: Spirc resets shuffle/repeat on every load and ignores
     // volume commands while this device is not the active Connect device, so we re-apply them.
     shuffle: Arc<AtomicBool>,
-    repeat: Arc<AtomicBool>,
+    repeat: Arc<AtomicU8>,
     volume: Arc<AtomicU16>,
+    /// The context the current playback was started from (a track uri for a single track).
+    context: Mutex<String>,
     closing: Arc<AtomicBool>,
     spirc_task: Mutex<Option<JoinHandle<()>>>,
     _event_task: JoinHandle<()>,
@@ -73,25 +76,48 @@ impl Player {
         let initial_volume = cache.volume().unwrap_or(u16::MAX / 2);
 
         // Default client id on Windows is the keymaster id, which matches the librespot-oauth token.
+        // Settings read once at startup (Settings marks them "applies after a restart").
+        let proxy = crate::prefs::get("proxy").as_str().and_then(|p| reqwest::Url::parse(p).ok());
         let session_config = SessionConfig {
             device_id: device_id(),
+            autoplay: Some(crate::prefs::bool_or("autoplay", true)),
+            proxy,
             ..Default::default()
         };
         let session = Session::new(session_config, Some(cache));
 
         let mixer = mixer::find(None).ok_or("no mixer")?(MixerConfig::default())
             .map_err(|e| e.to_string())?;
-        let backend = audio_backend::find(None).ok_or("no audio backend")?;
+        let bitrate = match crate::prefs::get("quality").as_str() {
+            Some("low") => librespot_playback::config::Bitrate::Bitrate96,
+            Some("normal") => librespot_playback::config::Bitrate::Bitrate160,
+            _ => librespot_playback::config::Bitrate::Bitrate320,
+        };
+        // Spotify's levels: Quiet ≈ -19 LUFS, Normal ≈ -14, Loud ≈ -11 (librespot's default is Normal).
+        let pregain = match crate::prefs::get("loudness").as_str() {
+            Some("quiet") => -5.0,
+            Some("loud") => 3.0,
+            _ => 0.0,
+        };
         let player_config = PlayerConfig {
-            gapless: true,
-            normalisation: true,
+            bitrate,
+            gapless: crate::prefs::bool_or("gapless", true),
+            normalisation: crate::prefs::bool_or("normalize", false),
+            normalisation_pregain_db: pregain,
             ..Default::default()
         };
         let player = LsPlayer::new(
             player_config,
             session.clone(),
             mixer.get_soft_volume(),
-            move || backend(None, AudioFormat::F32),
+            // Cadence's WASAPI sink follows the Windows default device (audio.rs).
+            // CADENCE_RODIO=1 falls back to librespot's rodio backend (pinned to the launch device).
+            move || match librespot_playback::audio_backend::find(None) {
+                Some(rodio) if std::env::var("CADENCE_RODIO").is_ok_and(|v| v == "1") => {
+                    rodio(None, librespot_playback::config::AudioFormat::F32)
+                }
+                _ => crate::audio::sink(),
+            },
         );
         let player_events = player.get_player_event_channel();
 
@@ -122,8 +148,11 @@ impl Player {
             })
         };
 
-        let shuffle = Arc::new(AtomicBool::new(false));
-        let repeat = Arc::new(AtomicBool::new(false));
+        // Remembered across launches; Spirc gets them with every load.
+        let shuffle = Arc::new(AtomicBool::new(crate::prefs::bool_or("shuffle", false)));
+        let repeat = Arc::new(AtomicU8::new(crate::prefs::u64_or("repeat", 0).min(2) as u8));
+        let _ = tx.send(Event::Shuffle(shuffle.load(Ordering::Relaxed)));
+        let _ = tx.send(Event::Repeat(repeat.load(Ordering::Relaxed)));
         let volume = Arc::new(AtomicU16::new(initial_volume));
         let event_task = tokio::spawn(map_events(
             player_events,
@@ -141,6 +170,7 @@ impl Player {
             shuffle,
             repeat,
             volume,
+            context: Mutex::new(String::new()),
             closing,
             spirc_task: Mutex::new(Some(spirc_task)),
             _event_task: event_task,
@@ -150,17 +180,38 @@ impl Player {
 
     /// Playlist/album/collection context, or a bare `spotify:track:..` uri (use index 0).
     pub fn play(&self, context_uri: &str, index: usize) {
+        self.load(context_uri, PlayingTrack::Index(index as u32), 0, true);
+    }
+
+    /// Starts `context_uri` with shuffle on from a random one of its `count` tracks.
+    pub fn play_shuffled(&self, context_uri: &str, count: usize) {
+        self.set_shuffle(true);
+        let start = if count > 1 { random_below(count) } else { 0 };
+        self.load(context_uri, PlayingTrack::Index(start as u32), 0, true);
+    }
+
+    pub fn context(&self) -> String {
+        self.context.lock().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    /// Loads a context at a track and position (session restore passes `start_playing: false`).
+    pub fn load(&self, context_uri: &str, track: PlayingTrack, seek_ms: u32, start_playing: bool) {
+        if let Ok(mut c) = self.context.lock() {
+            *c = context_uri.to_string();
+        }
+        let repeat = self.repeat.load(Ordering::Relaxed);
         let options = LoadRequestOptions {
-            start_playing: true,
-            seek_to: 0,
+            start_playing,
+            seek_to: seek_ms,
             context_options: Some(LoadContextOptions::Options(Options {
                 shuffle: self.shuffle.load(Ordering::Relaxed),
-                repeat: self.repeat.load(Ordering::Relaxed),
-                repeat_track: false,
+                repeat: repeat >= 1,
+                repeat_track: repeat == 2,
             })),
-            playing_track: Some(PlayingTrack::Index(index as u32)),
+            playing_track: Some(track),
         };
-        let request = if context_uri.starts_with("spotify:track:") {
+        let single = ["spotify:track:", "spotify:episode:", "spotify:local:"].iter().any(|p| context_uri.starts_with(p));
+        let request = if single {
             LoadRequest::from_tracks(vec![context_uri.to_owned()], options)
         } else {
             LoadRequest::from_context_uri(context_uri.to_owned(), options)
@@ -184,7 +235,60 @@ impl Player {
         self.report(self.spirc.prev());
     }
 
+    /// Artist name and portrait from librespot metadata (fallback without the Web API).
+    pub async fn artist_meta(&self, artist_uri: &str) -> Option<(String, String)> {
+        use librespot_metadata::{Artist, Metadata};
+        let id = SpotifyUri::from_uri(artist_uri).ok()?;
+        let a = tokio::time::timeout(Duration::from_secs(8), Artist::get(&self.session, &id)).await.ok()?.ok()?;
+        let img = a.portraits.0.iter().chain(a.portrait_group.0.iter()).max_by_key(|i| i.width).map(|i| format!("https://i.scdn.co/image/{}", i.id)).unwrap_or_default();
+        Some((a.name.clone(), img))
+    }
+
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    pub fn pause(&self) {
+        self.report(self.spirc.pause());
+    }
+
+    /// Plays an explicit list of uris (sorted / filtered lists, local files, popular tracks).
+    /// `shuffle`: Some(false) when the list is already in Cadence's own shuffle order.
+    pub fn play_list(&self, uris: &[String], index: usize, shuffle: Option<bool>) {
+        if uris.is_empty() {
+            return;
+        }
+        let uris: Vec<String> = uris.iter().take(1000).cloned().collect();
+        let index = index.min(uris.len() - 1);
+        let repeat = self.repeat.load(Ordering::Relaxed);
+        let options = LoadRequestOptions {
+            start_playing: true,
+            seek_to: 0,
+            context_options: Some(LoadContextOptions::Options(Options {
+                shuffle: shuffle.unwrap_or(self.shuffle.load(Ordering::Relaxed)),
+                repeat: repeat >= 1,
+                repeat_track: repeat == 2,
+            })),
+            playing_track: Some(PlayingTrack::Index(index as u32)),
+        };
+        self.report(self.spirc.activate());
+        self.report(self.spirc.set_volume(self.volume.load(Ordering::Relaxed)));
+        self.report(self.spirc.load(LoadRequest::from_tracks(uris, options)));
+    }
+
+    /// Popular tracks from librespot's artist metadata (internal API: may fail at any time).
+    pub async fn artist_top_tracks(&self, artist_uri: &str) -> Option<Vec<String>> {
+        use librespot_metadata::{Artist, Metadata};
+        let id = SpotifyUri::from_uri(artist_uri).ok()?;
+        let a = tokio::time::timeout(Duration::from_secs(8), Artist::get(&self.session, &id)).await.ok()?.ok()?;
+        let country = self.session.country();
+        let top = a.top_tracks.0.iter().find(|t| t.country == country).or_else(|| a.top_tracks.0.first())?;
+        let uris: Vec<String> = top.tracks.0.iter().filter_map(|t| t.to_uri().ok()).collect();
+        (!uris.is_empty()).then_some(uris)
+    }
+
     pub fn seek(&self, ms: u32) {
+        crate::dsp::flush();
         self.report(self.spirc.set_position_ms(ms));
     }
 
@@ -199,14 +303,78 @@ impl Player {
 
     pub fn set_shuffle(&self, on: bool) {
         self.shuffle.store(on, Ordering::Relaxed);
+        crate::prefs::set("shuffle", on.into());
         self.report(self.spirc.shuffle(on));
     }
 
-    pub fn set_repeat(&self, on: bool) {
-        self.repeat.store(on, Ordering::Relaxed);
-        self.report(self.spirc.repeat(on));
-        if !on {
-            self.report(self.spirc.repeat_track(false));
+    /// 0 off, 1 all, 2 one.
+    pub fn set_repeat(&self, mode: u8) {
+        let mode = mode.min(2);
+        self.repeat.store(mode, Ordering::Relaxed);
+        crate::prefs::set("repeat", mode.into());
+        self.report(self.spirc.repeat(mode >= 1));
+        self.report(self.spirc.repeat_track(mode == 2));
+    }
+
+    // Queue (librespot-connect patch, vendor/librespot-connect/CADENCE_PATCH.md). These only
+    // apply while Cadence is the active Connect device.
+
+    pub fn queue_insert(&self, uri: &str, position: Option<usize>) {
+        self.report(self.spirc.queue_insert(uri.to_string(), position));
+    }
+
+    pub fn queue_remove(&self, uid: &str) {
+        self.report(self.spirc.queue_remove(uid.to_string()));
+    }
+
+    pub fn queue_move(&self, uid: &str, position: usize) {
+        self.report(self.spirc.queue_move(uid.to_string(), position));
+    }
+
+    pub fn queue_clear(&self) {
+        self.report(self.spirc.queue_clear());
+    }
+
+    pub async fn queue_snapshot(&self) -> Option<librespot_connect::QueueSnapshot> {
+        tokio::time::timeout(Duration::from_secs(3), self.spirc.queue_snapshot()).await.ok().flatten()
+    }
+
+    /// Title, artists, album, duration and cover for a track or episode (librespot metadata).
+    pub async fn item_meta(&self, uri: &str) -> Option<ItemMeta> {
+        use librespot_metadata::{Episode, Metadata, Track};
+        let id = SpotifyUri::from_uri(uri).ok()?;
+        let cover = |imgs: &[librespot_metadata::image::Image]| {
+            imgs.iter()
+                .min_by_key(|i| (i.width - 300).abs())
+                .map(|i| format!("https://i.scdn.co/image/{}", i.id))
+        };
+        let timeout = Duration::from_secs(8);
+        match id {
+            SpotifyUri::Track { .. } => {
+                let t = tokio::time::timeout(timeout, Track::get(&self.session, &id)).await.ok()?.ok()?;
+                Some(ItemMeta {
+                    title: unescape(&t.name),
+                    artist: t.artists.0.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "),
+                    album: t.album.name.clone(),
+                    album_uri: t.album.id.to_uri().unwrap_or_default(),
+                    artist_uri: t.artists.0.first().and_then(|a| a.id.to_uri().ok()).unwrap_or_default(),
+                    duration_ms: t.duration.max(0) as u32,
+                    art_url: cover(&t.album.covers.0),
+                    explicit: t.is_explicit,
+                })
+            }
+            SpotifyUri::Episode { .. } => {
+                let e = tokio::time::timeout(timeout, Episode::get(&self.session, &id)).await.ok()?.ok()?;
+                Some(ItemMeta {
+                    title: unescape(&e.name),
+                    artist: e.show_name.clone(),
+                    duration_ms: e.duration.max(0) as u32,
+                    art_url: cover(&e.covers.0),
+                    explicit: e.is_explicit,
+                    ..Default::default()
+                })
+            }
+            _ => None,
         }
     }
 
@@ -225,6 +393,25 @@ impl Player {
             let _ = self.tx.send(Event::Error(e.to_string()));
         }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ItemMeta {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_uri: String,
+    pub artist_uri: String,
+    pub duration_ms: u32,
+    pub art_url: Option<String>,
+    pub explicit: bool,
+}
+
+/// Uniform in 0..n (n > 0), from the OS RNG.
+pub fn random_below(n: usize) -> usize {
+    let mut b = [0u8; 8];
+    let _ = getrandom::fill(&mut b);
+    (u64::from_le_bytes(b) % n as u64) as usize
 }
 
 pub struct LyricLine {
@@ -1219,7 +1406,7 @@ async fn map_events(
     mut rx: librespot_playback::player::PlayerEventChannel,
     tx: UnboundedSender<Event>,
     shuffle: Arc<AtomicBool>,
-    repeat: Arc<AtomicBool>,
+    repeat: Arc<AtomicU8>,
     volume: Arc<AtomicU16>,
 ) {
     let mut request_id: Option<u64> = None;
@@ -1266,6 +1453,7 @@ async fn map_events(
                     album: unescape(&album),
                     art_url,
                     duration_ms: audio_item.duration_ms,
+                    explicit: audio_item.is_explicit,
                 })
             }
             PlayerEvent::Playing { position_ms, .. }
@@ -1296,8 +1484,9 @@ async fn map_events(
                 Some(Event::Shuffle(on))
             }
             PlayerEvent::RepeatChanged { context, track } => {
-                repeat.store(context, Ordering::Relaxed);
-                Some(Event::Repeat(context || track))
+                let mode = if track { 2 } else { context as u8 };
+                repeat.store(mode, Ordering::Relaxed);
+                Some(Event::Repeat(mode))
             }
             _ => None,
         };

@@ -777,25 +777,18 @@ fn palette(i: usize) -> &'static [u32] {
     [LYRIC_COLORS, HIGHLIGHT_COLORS, SECONDARY_COLORS][i]
 }
 
-fn settings_path() -> std::path::PathBuf {
-    crate::auth::data_dir().join("settings.json")
-}
-
 fn load_settings() -> Settings {
-    let v: serde_json::Value = std::fs::read(settings_path())
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
-    let col = |i: usize| v["k_colors"][i].as_u64().map_or(0, |c| c as usize % palette(i).len());
+    let colors = crate::prefs::get("k_colors");
+    let col = |i: usize| colors[i].as_u64().map_or(0, |c| c as usize % palette(i).len());
     Settings {
-        k_style: v["k_style"].as_str().unwrap_or("visual").to_string(),
+        k_style: crate::prefs::get("k_style").as_str().unwrap_or("visual").to_string(),
         k_colors: [col(0), col(1), col(2)],
     }
 }
 
 fn save_settings(s: &Settings) {
-    let v = serde_json::json!({ "k_style": s.k_style, "k_colors": s.k_colors });
-    let _ = std::fs::write(settings_path(), v.to_string());
+    crate::prefs::set("k_style", serde_json::json!(s.k_style));
+    crate::prefs::set("k_colors", serde_json::json!(s.k_colors));
 }
 
 struct State {
@@ -818,6 +811,10 @@ struct State {
     timer: slint::Timer,
     /// The renderer calls frame() before every frame (GPU renderer): karaoke runs on vsync.
     vsync: bool,
+    /// Per-song lyrics timing offset (ms, + = lyrics earlier).
+    offset: i64,
+    /// Playback speed (podcasts); the clock advances this much per real millisecond.
+    rate: f32,
 }
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
@@ -827,7 +824,7 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 impl State {
     fn now(&self) -> u32 {
         if self.playing {
-            let ms = self.pos as u64 + self.at.elapsed().as_millis() as u64;
+            let ms = self.pos as u64 + (self.at.elapsed().as_millis() as f32 * self.rate) as u64;
             (ms.min(self.duration.max(self.pos) as u64)) as u32
         } else {
             self.pos
@@ -854,7 +851,7 @@ fn tick() {
         let pb = ui.global::<Playback>();
         let pos = s.now();
         pb.set_position_ms(pos as i32);
-        let lyric = pos as i64;
+        let lyric = pos as i64 + s.offset;
         pb.set_lyric_ms(lyric.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
         if (lyric - s.last_lyric).abs() > 1500 {
             s.snap = true;
@@ -890,6 +887,9 @@ fn tick() {
                 return;
             }
             Some(Duration::from_millis(16))
+        } else if pb.get_side_open() && s.lyrics.as_ref().is_some_and(|l| l.synced) {
+            // The side panel highlights the active line.
+            Some(Duration::from_millis(200))
         } else if pb.get_expanded() {
             // Wake exactly when the next letter or line lights (at most 250 ms apart for the
             // progress bars); Slint's own animations run on vsync in between.
@@ -995,6 +995,8 @@ pub fn init(ui: &MainWindow) {
             snap: true,
             timer: slint::Timer::default(),
             vsync: false,
+            offset: 0,
+            rate: 1.0,
         })
     });
 
@@ -1109,6 +1111,7 @@ pub fn on_track(duration_ms: u32) {
             pb.set_lyr_active(-1);
             pb.set_lyr_synced(false);
             pb.set_lyr_hint("finding lyrics…".into());
+            pb.set_lyr_plain(ModelRc::default());
             pb.set_karaoke_available(false);
             pb.set_karaoke(false);
             s.karaoke.hide_all();
@@ -1130,6 +1133,8 @@ pub fn set_lyrics(lyrics: Option<Lyrics>) {
             Some(_) => "".into(),
         });
         pb.set_lyr_synced(lyrics.as_ref().is_some_and(|l| l.synced));
+        let plain: Vec<slint::SharedString> = lyrics.as_ref().map_or(Vec::new(), |l| l.lines.iter().map(|x| x.text.as_str().into()).collect());
+        pb.set_lyr_plain(ModelRc::new(VecModel::from(plain)));
         s.lyrics = lyrics.map(Rc::new);
         s.active = -1;
         pb.set_lyr_active(-1);
@@ -1209,6 +1214,36 @@ pub fn relayout() {
         }
     });
     tick();
+}
+
+/// The per-song timing offset (ms). Applied to the lyrics clock only, never to playback.
+pub fn set_offset(ms: i64) {
+    with(|s| {
+        s.offset = ms;
+        s.snap = true;
+        if let Some(ui) = s.ui.upgrade() {
+            ui.global::<Playback>().set_lyr_offset(ms as i32);
+        }
+    });
+    tick();
+}
+
+pub fn offset() -> i64 {
+    with(|s| s.offset).unwrap_or(0)
+}
+
+/// Playback speed for the clock (1.0 normally; podcasts can run faster or slower).
+pub fn set_rate(rate: f32) {
+    with(|s| {
+        s.pos = s.now();
+        s.at = Instant::now();
+        s.rate = rate;
+    });
+}
+
+/// Start time of lyric line `i` minus the offset (clicking a line seeks there).
+pub fn line_start(i: usize) -> Option<u32> {
+    with(|s| s.lyrics.as_ref().and_then(|l| l.lines.get(i)).map(|l| (l.start_ms as i64 - s.offset).max(0) as u32)).flatten()
 }
 
 /// Test hook (CADENCE_DEMO): start the clock at `position_ms` as if playing.

@@ -1,0 +1,183 @@
+// Mini player (always on top, remembers its position) and the media-key overlay. Separate
+// windows have their own globals, so everything here is plain properties set by src/mini.rs.
+import { Theme } from "theme.slint";
+import { Cover } from "cover.slint";
+import { Icons } from "now_playing.slint";
+
+component Btn inherits Rectangle {
+    in property <string> icon;
+    in property <bool> solid;
+    in property <length> size: 18px;
+    callback clicked();
+    width: 32px;
+    height: 32px;
+    border-radius: 16px;
+    background: ta.pressed ? #ffffff26 : (ta.has-hover ? #ffffff14 : transparent);
+    Path {
+        x: (parent.width - root.size) / 2;
+        y: (parent.height - root.size) / 2;
+        width: root.size;
+        height: root.size;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.icon;
+        fill: root.solid ? #ffffffeb : transparent;
+        stroke: #ffffffeb;
+        stroke-width: root.solid ? 0.5px : 1.6px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component MiniWindow inherits Window {
+    title: "Cadence mini player";
+    icon: @image-url("../assets/icon.png");
+    no-frame: true;
+    always-on-top: true;
+    width: 380px;
+    height: 124px;
+    background: #0d0d0f;
+    default-font-family: Theme.font-family;
+
+    in property <string> track-title;
+    in property <string> artist;
+    in property <image> art;
+    in property <bool> playing;
+    in property <int> position-ms;
+    in property <int> duration-ms;
+    in-out property <float> volume;
+    in property <color> accent: Theme.accent;
+    callback play-pause();
+    callback next();
+    callback prev();
+    callback seek(int);
+    callback set-volume(float);
+    callback close-mini();
+    callback expand();
+    callback drag();
+
+    Rectangle {
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: #ffffff1a;
+    }
+    // Drag anywhere that isn't a control.
+    TouchArea {
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                root.drag();
+            }
+        }
+    }
+    Cover {
+        x: 12px;
+        y: 12px;
+        width: 72px;
+        height: 72px;
+        source: root.art;
+        radius: 8px;
+        backdrop: #0d0d0f;
+    }
+    VerticalLayout {
+        x: 96px;
+        y: 10px;
+        width: root.width - 96px - 64px;
+        height: 40px;
+        spacing: 1px;
+        Text { text: root.track-title == "" ? "Nothing playing" : root.track-title; color: #ffffffeb; font-size: 14px; font-weight: 600; overflow: elide; }
+        Text { text: root.artist; color: #ffffffa6; font-size: 12px; overflow: elide; }
+    }
+    Btn { x: root.width - 68px; y: 8px; icon: Icons.mini; size: 15px; clicked => { root.expand(); } }
+    Btn { x: root.width - 38px; y: 8px; icon: Icons.close; size: 15px; clicked => { root.close-mini(); } }
+    HorizontalLayout {
+        x: 92px;
+        y: 50px;
+        height: 36px;
+        spacing: 2px;
+        alignment: start;
+        Btn { icon: Icons.prev; solid: true; clicked => { root.prev(); } }
+        Btn { icon: root.playing ? Icons.pause : Icons.play; solid: true; size: 22px; clicked => { root.play-pause(); } }
+        Btn { icon: Icons.next; solid: true; clicked => { root.next(); } }
+        Rectangle { width: 12px; }
+        Path {
+            y: 9px; width: 18px; height: 18px;
+            viewbox-width: 24; viewbox-height: 24;
+            commands: Icons.volume-low;
+            fill: transparent;
+            stroke: #ffffffa6;
+            stroke-width: 1.6px;
+        }
+        vol := Rectangle {
+            width: 84px;
+            Rectangle { y: 16px; height: 4px; border-radius: 2px; background: #ffffff29; }
+            Rectangle { y: 16px; height: 4px; width: parent.width * root.volume; border-radius: 2px; background: root.accent; }
+            TouchArea {
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.up) {
+                        root.volume = Math.clamp(self.mouse-x / self.width, 0, 1);
+                        root.set-volume(root.volume);
+                    }
+                }
+                moved => {
+                    if (self.pressed) {
+                        root.volume = Math.clamp(self.mouse-x / self.width, 0, 1);
+                        root.set-volume(root.volume);
+                    }
+                }
+            }
+        }
+    }
+    // Seek bar along the bottom.
+    Rectangle {
+        x: 12px;
+        y: root.height - 22px;
+        width: root.width - 24px;
+        height: 14px;
+        Rectangle { y: 5px; height: 4px; border-radius: 2px; background: #ffffff29; }
+        Rectangle {
+            y: 5px;
+            height: 4px;
+            width: root.duration-ms > 0 ? parent.width * Math.min(1, root.position-ms / root.duration-ms) : 0px;
+            border-radius: 2px;
+            background: root.accent;
+        }
+        TouchArea {
+            clicked => {
+                if (root.duration-ms > 0) {
+                    root.seek(Math.round(self.mouse-x / self.width * root.duration-ms));
+                }
+            }
+        }
+    }
+}
+
+export component OsdWindow inherits Window {
+    title: "Cadence";
+    no-frame: true;
+    always-on-top: true;
+    width: 360px;
+    height: 84px;
+    background: transparent;
+    default-font-family: Theme.font-family;
+    in property <string> line1;
+    in property <string> line2;
+    in property <string> line3;
+    in property <image> art;
+    Rectangle {
+        border-radius: 14px;
+        background: #141416f2;
+        border-width: 1px;
+        border-color: #ffffff1f;
+    }
+    Cover { x: 12px; y: 12px; width: 60px; height: 60px; source: root.art; radius: 8px; backdrop: #141416; }
+    VerticalLayout {
+        x: 84px;
+        width: root.width - 96px;
+        alignment: center;
+        spacing: 2px;
+        Text { text: root.line1; color: #ffffff8c; font-size: 11px; font-weight: 600; }
+        Text { text: root.line2; color: #ffffffeb; font-size: 15px; font-weight: 600; overflow: elide; }
+        Text { text: root.line3; color: #ffffffa6; font-size: 12px; overflow: elide; }
+    }
+}

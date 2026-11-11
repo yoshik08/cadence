@@ -1,0 +1,70 @@
+// Right-side Now Playing panel: art, track, synced lyrics and the per-song timing offset.
+// Shown on artist and album pages by default and whenever the user opens it.
+import { Theme } from "theme.slint";
+import { Cover } from "cover.slint";
+import { ScrollView } from "std-widgets.slint";
+import { Playback, IconButton, Icons } from "now_playing.slint";
+import { Label, Caption, SecondaryButton } from "widgets.slint";
+
+export component NowPlayingPanel inherits Rectangle {
+    background: Theme.bg;
+    clip: true;
+    Rectangle { x: 0; width: 1px; background: Theme.divider; }
+    property <length> line-h: 34px;
+    VerticalLayout {
+        padding: Theme.space-lg;
+        spacing: Theme.space-md;
+        HorizontalLayout {
+            height: 32px;
+            Label { text: "Now playing"; font-size: Theme.size-heading; font-weight: Theme.weight-semibold; vertical-alignment: center; }
+            IconButton { width: 32px; height: 32px; icon-size: 16px; commands: Icons.close; clicked => { Playback.side-open = false; } }
+        }
+        if Playback.title == "" : Caption { text: "Nothing playing."; }
+        if Playback.title != "" : Cover {
+            height: self.width;
+            source: Playback.side-art;
+            radius: Theme.radius-art;
+            backdrop: Theme.bg;
+        }
+        if Playback.title != "" : VerticalLayout {
+            spacing: 2px;
+            Label { text: Playback.title; font-size: Theme.size-heading; font-weight: Theme.weight-semibold; }
+            Rectangle {
+                height: artist-t.preferred-height;
+                artist-t := Caption { text: Playback.artist; font-size: Theme.size-body; color: aa.has-hover ? Theme.text : Theme.text-secondary; }
+                aa := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { Playback.open-artist(); } }
+            }
+        }
+        if Playback.title != "" : HorizontalLayout {
+            spacing: Theme.space-xs;
+            Label { text: "Lyrics"; font-weight: Theme.weight-semibold; vertical-alignment: center; horizontal-stretch: 1; }
+            if Playback.lyr-plain.length > 0 && Playback.lyr-synced : HorizontalLayout {
+                spacing: 2px;
+                SecondaryButton { h: 28px; text: "−0.1s"; clicked => { Playback.lyrics-offset(-100); } }
+                Caption { width: 56px; text: Playback.lyr-offset == 0 ? "in sync" : (Playback.lyr-offset > 0 ? "+" : "") + Playback.lyr-offset / 1000 + "s"; horizontal-alignment: center; vertical-alignment: center; }
+                SecondaryButton { h: 28px; text: "+0.1s"; clicked => { Playback.lyrics-offset(100); } }
+            }
+        }
+        if Playback.title != "" && Playback.lyr-plain.length == 0 : Caption { text: Playback.lyr-hint != "" ? Playback.lyr-hint : "No lyrics for this track."; wrap: word-wrap; }
+        if Playback.lyr-plain.length > 0 : flick := Flickable {
+            vertical-stretch: 1;
+            content-height: Playback.lyr-plain.length * root.line-h + self.height;
+            // Keep the active line about a third of the way down.
+            content-y: Playback.lyr-synced && Playback.lyr-active >= 0 ? Math.min(0px, -(Playback.lyr-active * root.line-h) + self.height / 3) : 0px;
+            animate content-y { duration: 300ms; easing: Theme.ease; }
+            for l[i] in Playback.lyr-plain : Rectangle {
+                y: i * root.line-h;
+                height: root.line-h;
+                Label {
+                    width: parent.width;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: l;
+                    font-weight: Theme.weight-semibold;
+                    color: !Playback.lyr-synced ? Theme.text : (i == Playback.lyr-active ? Theme.text : (i < Playback.lyr-active ? Theme.text-tertiary : Theme.text-secondary));
+                }
+                TouchArea { clicked => { Playback.seek-line(i); } }
+            }
+        }
+    }
+}

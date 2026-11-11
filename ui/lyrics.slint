@@ -148,7 +148,7 @@ component Transport inherits HorizontalLayout {
     TransportButton { y: (parent.height - self.height) / 2; icon: Icons.prev; solid: true; icon-size: 22px; clicked => { Playback.prev(); } }
     PlayDisc { y: (parent.height - self.height) / 2; size: root.disc; }
     TransportButton { y: (parent.height - self.height) / 2; icon: Icons.next; solid: true; icon-size: 22px; clicked => { Playback.next(); } }
-    TransportButton { y: (parent.height - self.height) / 2; icon: Icons.repeat; active: Playback.repeat; icon-size: 18px; clicked => { Playback.toggle-repeat(); } }
+    TransportButton { y: (parent.height - self.height) / 2; icon: Icons.repeat; active: Playback.repeat > 0; icon-size: 18px; clicked => { Playback.toggle-repeat(); } }
 }
 
 global Clock {
@@ -627,6 +627,35 @@ export component LyricsOverlay inherits Rectangle {
             y: (parent.height - root.side-h) / 2 + root.side-h - 56px;
             width: root.side;
             height: 56px;
+        }
+        // Per-song lyrics timing offset.
+        if Playback.lyr-synced && !Playback.karaoke : HorizontalLayout {
+            x: root.pad;
+            y: (parent.height - root.side-h) / 2 + root.side-h + 8px;
+            width: root.side;
+            height: 28px;
+            alignment: center;
+            spacing: 8px;
+            Rectangle {
+                width: 52px; height: 28px; border-radius: 14px;
+                background: om.has-hover ? #ffffff2e : #ffffff14;
+                Text { text: "−0.1s"; color: #ffffffcc; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                om := TouchArea { clicked => { Playback.lyrics-offset(-100); } }
+            }
+            Text {
+                width: 72px;
+                text: Playback.lyr-offset == 0 ? "lyrics in sync" : (Playback.lyr-offset > 0 ? "+" : "") + Playback.lyr-offset / 1000 + "s";
+                color: #ffffff8c;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: 52px; height: 28px; border-radius: 14px;
+                background: op.has-hover ? #ffffff2e : #ffffff14;
+                Text { text: "+0.1s"; color: #ffffffcc; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                op := TouchArea { clicked => { Playback.lyrics-offset(100); } }
+            }
         }
 
         // .lyrics-lines

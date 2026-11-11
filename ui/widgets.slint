@@ -1,0 +1,702 @@
+// Shared building blocks for the browse pages.
+import { Theme } from "theme.slint";
+import { Cover } from "cover.slint";
+import { Icons } from "now_playing.slint";
+
+export struct Card {
+    title: string,
+    subtitle: string,
+    uri: string,
+    art: image,
+    liked: bool,
+    round: bool,
+    pinned: bool,
+    // Cadence-local item (local folder / local file), labelled as such.
+    local: bool,
+}
+
+export struct TrackRow {
+    title: string,
+    artist: string,
+    album: string,
+    added: string,
+    duration: string,
+    uri: string,
+    explicit: bool,
+    liked: bool,
+    // The liked state is known (hearts stay hidden until it is).
+    liked-known: bool,
+    // Position in the playing context (rows can be sorted differently).
+    index: int,
+    unavailable: bool,
+    local: bool,
+    // Find section: already in the playlist. Episodes: played.
+    marked: bool,
+    // Episodes: 0..1 listened.
+    progress: float,
+    note: string,
+}
+
+export struct ShelfData {
+    key: string,
+    title: string,
+    round: bool,
+    cards: [Card],
+    // Non-empty: a "Show all" link opening this route.
+    more: string,
+    note: string,
+    hidden: bool,
+}
+
+export component Label inherits Text {
+    font-family: Theme.font-family;
+    font-size: Theme.size-body;
+    font-weight: Theme.weight-regular;
+    color: Theme.text;
+    overflow: elide;
+    min-width: 0px;
+}
+
+export component Caption inherits Label {
+    font-size: Theme.size-caption;
+    letter-spacing: Theme.tracking-caption;
+    color: Theme.text-secondary;
+}
+
+export component Glyph inherits Path {
+    in property <color> tint: Theme.text-secondary;
+    in property <length> size: 18px;
+    in property <bool> solid;
+    width: root.size;
+    height: root.size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: root.solid ? root.tint : transparent;
+    stroke: root.tint;
+    stroke-width: (root.solid ? 0.6px : 1.75px) * root.size / 24px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+}
+
+// Fades and lifts a page in when it is created.
+export component PageFade inherits Rectangle {
+    property <bool> shown: false;
+    width: 100%;
+    height: 100%;
+    opacity: root.shown ? 1 : 0;
+    y: root.shown ? 0px : Theme.space-lg;
+    animate opacity { duration: Theme.duration-normal; easing: Theme.ease; }
+    animate y { duration: Theme.duration-normal; easing: Theme.ease; }
+    init => {
+        if (root.opacity < 1 && root.y >= 0px) {
+            root.shown = true;
+        }
+    }
+    @children
+}
+
+export component ArtTile inherits Rectangle {
+    in property <image> source;
+    in property <length> radius;
+    in property <color> backdrop: Theme.bg;
+    in property <bool> liked;
+    in property <bool> local;
+    in property <bool> hovered;
+    in property <bool> pressed;
+    Cover {
+        width: parent.width;
+        height: parent.height;
+        source: root.source;
+        radius: root.radius;
+        backdrop: root.backdrop;
+        background: Theme.surface-raised;
+    }
+    if root.liked || (root.local && root.source.width == 0) : Glyph {
+        size: parent.width * 0.38;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        solid: root.liked;
+        tint: root.liked ? Theme.accent : Theme.text-tertiary;
+        commands: root.liked ? Icons.heart : Icons.folder;
+    }
+    Rectangle {
+        border-radius: root.radius;
+        background: root.pressed ? Theme.pressed : (root.hovered ? Theme.hover : transparent);
+        animate background { duration: Theme.duration-fast; }
+    }
+}
+
+// Circular play button shown over a card on hover.
+export component HoverPlay inherits Rectangle {
+    in property <bool> shown;
+    out property <bool> hovered: ta.has-hover;
+    callback clicked();
+    width: 44px;
+    height: 44px;
+    border-radius: 22px;
+    background: ta.has-hover ? #ffffff : Theme.text;
+    opacity: root.shown ? 1 : 0;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: #00000080;
+    animate opacity { duration: Theme.duration-fast; }
+    Glyph {
+        x: (parent.width - self.width) / 2 + 1px;
+        y: (parent.height - self.height) / 2;
+        size: 20px;
+        solid: true;
+        tint: Theme.bg;
+        commands: Icons.play;
+    }
+    ta := TouchArea {
+        enabled: root.shown;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component CardView inherits Rectangle {
+    in property <Card> card;
+    in property <length> art-size: 160px;
+    in property <bool> playable: true;
+    callback clicked();
+    callback play();
+    callback menu(length, length);
+    width: root.art-size;
+    height: root.art-size + 44px;
+    VerticalLayout {
+        spacing: 0;
+        ArtTile {
+            width: root.art-size;
+            height: root.art-size;
+            radius: root.card.round ? root.art-size / 2 : Theme.radius-art;
+            source: root.card.art;
+            liked: root.card.liked;
+            local: root.card.local;
+            hovered: ta.has-hover;
+            pressed: ta.pressed;
+        }
+        Rectangle { height: Theme.space-xs; }
+        Label {
+            text: root.card.title;
+            font-weight: Theme.weight-medium;
+            horizontal-alignment: root.card.round ? center : left;
+        }
+        Caption {
+            text: root.card.local ? "Local · " + root.card.subtitle : root.card.subtitle;
+            horizontal-alignment: root.card.round ? center : left;
+        }
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+    if root.playable : HoverPlay {
+        x: root.art-size - self.width - Theme.space-sm;
+        y: root.art-size - self.height - Theme.space-sm;
+        shown: ta.has-hover || self.hovered;
+        clicked => { root.play(); }
+    }
+}
+
+// Placeholder card while a shelf loads.
+export component SkeletonCard inherits Rectangle {
+    in property <length> art-size: 160px;
+    in property <bool> round;
+    width: root.art-size;
+    height: root.art-size + 44px;
+    Rectangle {
+        y: 0;
+        height: root.art-size;
+        border-radius: root.round ? root.art-size / 2 : Theme.radius-art;
+        background: Theme.surface;
+    }
+    Rectangle { x: 0; y: root.art-size + 8px; width: root.art-size * 0.8; height: 12px; border-radius: 4px; background: Theme.surface; }
+    Rectangle { x: 0; y: root.art-size + 26px; width: root.art-size * 0.5; height: 10px; border-radius: 4px; background: Theme.surface; }
+}
+
+// Horizontal shelf of cards; sideways wheel / trackpad and drag scroll it.
+export component Shelf inherits Rectangle {
+    in property <[Card]> model;
+    in property <length> art-size: 160px;
+    in property <length> lead: Theme.space-2xl;
+    in property <bool> skeleton;
+    callback picked(string);
+    callback play(string);
+    callback menu(string, length, length);
+    height: root.art-size + 44px;
+    TouchArea {
+        scroll-event(e) => {
+            if (abs(e.delta-y) > abs(e.delta-x)) {
+                return reject;
+            }
+            flick.content-x = max(flick.width - flick.content-width, min(0px, flick.content-x + e.delta-x));
+            return accept;
+        }
+    }
+    flick := Flickable {
+        content-width: root.lead * 2 + Math.max(root.model.length, root.skeleton ? 6 : 0) * (root.art-size + Theme.space-lg) - Theme.space-lg;
+        content-height: root.height;
+        if root.skeleton && root.model.length == 0 : HorizontalLayout {
+            x: root.lead;
+            spacing: Theme.space-lg;
+            for i in 6 : SkeletonCard { art-size: root.art-size; }
+        }
+        for c[i] in root.model : CardView {
+            x: root.lead + i * (root.art-size + Theme.space-lg);
+            card: c;
+            art-size: root.art-size;
+            clicked => { root.picked(c.uri); }
+            play => { root.play(c.uri); }
+            menu(x, y) => { root.menu(c.uri, x, y); }
+        }
+    }
+}
+
+// Explicit badge.
+export component Explicit inherits Rectangle {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    background: Theme.text-tertiary;
+    Text {
+        text: "E";
+        font-size: 10px;
+        font-weight: 700;
+        color: Theme.bg;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// One row of a track table. Columns are placed by hand so every row lines up; album and date
+// columns hide on narrow widths or when the page has none.
+export component TrackItem inherits Rectangle {
+    in property <TrackRow> item;
+    in property <int> number;
+    in property <bool> show-album: true;
+    in property <bool> show-added;
+    in property <bool> show-heart: true;
+    in property <bool> selected;
+    in property <bool> playing;
+    in property <string> action-label;
+    callback clicked();
+    callback double-clicked();
+    callback menu(length, length);
+    callback heart();
+    callback action();
+    height: 52px;
+
+    property <bool> wide: root.width >= 860px;
+    property <length> pad: Theme.space-lg;
+    property <length> idx-w: 28px;
+    property <length> dur-w: 52px;
+    property <length> heart-w: root.show-heart ? 32px : 0px;
+    property <length> act-w: root.action-label != "" ? 72px : 0px;
+    property <length> added-w: root.show-added && root.wide ? 112px : 0px;
+    property <bool> album-on: root.show-album && root.width >= 640px;
+    property <length> gap: Theme.space-lg;
+    property <length> inner-w: root.width - 2 * Theme.space-lg;
+    property <length> avail: inner-w - 2 * pad - idx-w - dur-w - heart-w - act-w - added-w - 4 * gap;
+    property <length> title-w: root.album-on ? avail * 0.6 : avail;
+    property <length> album-w: avail * 0.4 - gap;
+    property <length> title-x: Theme.space-lg + pad + idx-w + gap;
+    property <length> album-x: title-x + title-w + gap;
+    property <length> added-x: album-x + (root.album-on ? album-w + gap : 0px);
+    opacity: root.item.unavailable ? 0.45 : 1;
+
+    Rectangle {
+        x: Theme.space-lg;
+        width: root.inner-w;
+        border-radius: Theme.radius-control;
+        background: ta.pressed ? Theme.pressed : (root.selected ? Theme.surface-raised : (ta.has-hover ? Theme.hover : transparent));
+        animate background { duration: Theme.duration-fast; }
+    }
+    if !root.playing : Label {
+        x: Theme.space-lg + root.pad;
+        width: root.idx-w;
+        y: (parent.height - self.height) / 2;
+        text: root.number > 0 ? "\{root.number}" : "";
+        color: Theme.text-tertiary;
+    }
+    if root.playing : Rectangle {
+        x: Theme.space-lg + root.pad;
+        y: (parent.height - 12px) / 2;
+        width: 12px;
+        height: 12px;
+        Rectangle { x: 0px; y: 4px; width: 2px; height: 8px; background: Theme.accent; border-radius: 1px; }
+        Rectangle { x: 5px; y: 0px; width: 2px; height: 12px; background: Theme.accent; border-radius: 1px; }
+        Rectangle { x: 10px; y: 6px; width: 2px; height: 6px; background: Theme.accent; border-radius: 1px; }
+    }
+    VerticalLayout {
+        x: root.title-x;
+        width: root.title-w;
+        alignment: center;
+        spacing: 2px;
+        Label {
+            text: root.item.title;
+            font-weight: Theme.weight-medium;
+            color: root.playing ? Theme.accent : Theme.text;
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            if root.item.explicit : Explicit { y: 1px; }
+            if root.item.local : Rectangle {
+                width: local-t.preferred-width + 8px;
+                height: 16px;
+                border-radius: 3px;
+                border-width: 1px;
+                border-color: Theme.text-tertiary;
+                local-t := Text { text: "LOCAL"; font-size: 9px; font-weight: 700; color: Theme.text-tertiary; horizontal-alignment: center; vertical-alignment: center; }
+            }
+            Caption {
+                text: root.item.note != "" ? root.item.note : root.item.artist;
+                horizontal-stretch: 1;
+            }
+        }
+        if root.item.progress > 0 : Rectangle {
+            height: 3px;
+            width: 120px;
+            border-radius: 2px;
+            background: Theme.track;
+            Rectangle { x: 0; width: parent.width * Math.min(1, root.item.progress); border-radius: 2px; background: Theme.accent; }
+        }
+    }
+    if root.album-on : Caption {
+        x: root.album-x;
+        width: root.album-w;
+        y: (parent.height - self.height) / 2;
+        font-size: Theme.size-body;
+        text: root.item.album;
+        color: Theme.text-secondary;
+    }
+    if root.added-w > 0 : Caption {
+        x: root.added-x;
+        width: root.added-w;
+        y: (parent.height - self.height) / 2;
+        text: root.item.added;
+        color: Theme.text-tertiary;
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+    if root.show-heart && root.item.liked-known : Rectangle {
+        x: root.width - Theme.space-lg - root.pad - root.dur-w - root.act-w - root.heart-w;
+        y: (parent.height - self.height) / 2;
+        width: 28px;
+        height: 28px;
+        border-radius: 14px;
+        background: heart-ta.has-hover ? Theme.hover : transparent;
+        opacity: root.item.liked || ta.has-hover || heart-ta.has-hover ? 1 : 0;
+        Glyph {
+            x: 5px;
+            y: 5px;
+            size: 18px;
+            solid: root.item.liked;
+            tint: root.item.liked ? Theme.accent : Theme.text-secondary;
+            commands: Icons.heart;
+        }
+        heart-ta := TouchArea { clicked => { root.heart(); } }
+    }
+    if root.action-label != "" : Rectangle {
+        x: root.width - Theme.space-lg - root.pad - root.dur-w - root.act-w + 4px;
+        y: (parent.height - self.height) / 2;
+        width: root.act-w - 12px;
+        height: 30px;
+        border-radius: Theme.radius-pill;
+        border-width: 1px;
+        border-color: root.item.marked ? Theme.divider : Theme.text-tertiary;
+        background: act-ta.has-hover ? Theme.hover : transparent;
+        Label {
+            width: parent.width;
+            height: parent.height;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            font-size: Theme.size-caption;
+            font-weight: Theme.weight-semibold;
+            text: root.item.marked ? "Added" : root.action-label;
+            color: root.item.marked ? Theme.text-tertiary : Theme.text;
+        }
+        act-ta := TouchArea { clicked => { root.action(); } }
+    }
+    Label {
+        x: root.width - Theme.space-lg - root.pad - root.dur-w;
+        width: root.dur-w;
+        y: (parent.height - self.height) / 2;
+        text: root.item.duration;
+        color: Theme.text-tertiary;
+        horizontal-alignment: right;
+    }
+}
+
+component HeaderCol inherits Rectangle {
+    in property <string> label;
+    in property <string> key;
+    in property <string> current;
+    in property <bool> desc;
+    in property <bool> enabled;
+    in property <bool> align-right;
+    callback pick(string);
+    Caption {
+        width: parent.width;
+        height: parent.height;
+        vertical-alignment: center;
+        horizontal-alignment: root.align-right ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
+        text: root.label + (root.key != "" && root.current == root.key ? (root.desc ? "  ↓" : "  ↑") : "");
+        color: root.current == root.key ? Theme.text : (t.has-hover && root.enabled ? Theme.text-secondary : Theme.text-tertiary);
+    }
+    t := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.pick(root.key); }
+    }
+}
+
+// Column header for track tables; clicking a column sorts by it.
+export component TableHeader inherits Rectangle {
+    in property <bool> show-album: true;
+    in property <bool> show-added;
+    in property <bool> show-heart: true;
+    in property <string> sort-key;
+    in property <bool> sort-desc;
+    in property <bool> sortable: true;
+    callback sort(string);
+    height: 36px;
+    property <bool> wide: root.width >= 860px;
+    property <length> pad: Theme.space-lg;
+    property <length> idx-w: 28px;
+    property <length> dur-w: 52px;
+    property <length> heart-w: root.show-heart ? 32px : 0px;
+    property <length> added-w: root.show-added && root.wide ? 112px : 0px;
+    property <bool> album-on: root.show-album && root.width >= 640px;
+    property <length> gap: Theme.space-lg;
+    property <length> inner-w: root.width - 2 * Theme.space-lg;
+    property <length> avail: inner-w - 2 * pad - idx-w - dur-w - heart-w - added-w - 4 * gap;
+    property <length> title-w: root.album-on ? avail * 0.6 : avail;
+    property <length> album-w: avail * 0.4 - gap;
+    property <length> title-x: Theme.space-lg + pad + idx-w + gap;
+    property <length> album-x: title-x + title-w + gap;
+    property <length> added-x: album-x + (root.album-on ? album-w + gap : 0px);
+    Rectangle { y: parent.height - 1px; height: 1px; x: Theme.space-lg; width: root.inner-w; background: Theme.divider; }
+
+
+    HeaderCol { x: Theme.space-lg + root.pad; width: root.idx-w; label: "#"; key: ""; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
+    HeaderCol { x: root.title-x; width: root.title-w * 0.5; label: "Title"; key: "title"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
+    HeaderCol { x: root.title-x + root.title-w * 0.5; width: root.title-w * 0.5; label: "Artist"; key: "artist"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
+    if root.album-on : HeaderCol { x: root.album-x; width: root.album-w; label: "Album"; key: "album"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
+    if root.added-w > 0 : HeaderCol { x: root.added-x; width: root.added-w; label: "Date added"; key: "added"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
+    HeaderCol { x: root.width - Theme.space-lg - root.pad - root.dur-w - 20px; width: root.dur-w + 20px; label: "Time"; key: "duration"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; align-right: true; pick(k) => { root.sort(k); } }
+}
+
+export component PrimaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: max(104px, t.preferred-width + 40px);
+    height: 44px;
+    border-radius: Theme.radius-control;
+    opacity: root.enabled ? 1 : 0.4;
+    background: ta.pressed ? Theme.text-secondary : (ta.has-hover ? #ffffff : Theme.text);
+    animate background { duration: Theme.duration-fast; }
+    t := Label {
+        width: parent.width;
+        height: parent.height;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        text: root.text;
+        font-weight: Theme.weight-semibold;
+        color: Theme.bg;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component SecondaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> active;
+    in property <length> h: 44px;
+    callback clicked();
+    width: max(h, t.preferred-width + 32px);
+    height: root.h;
+    border-radius: Theme.radius-control;
+    opacity: root.enabled ? 1 : 0.4;
+    background: root.active ? Theme.surface-raised : (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.surface-raised : Theme.surface));
+    border-width: root.active ? 1px : 0px;
+    border-color: Theme.text-tertiary;
+    animate background { duration: Theme.duration-fast; }
+    t := Label {
+        width: parent.width;
+        height: parent.height;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        text: root.text;
+        font-weight: Theme.weight-semibold;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Round icon button for page headers (⋯, heart, follow).
+export component RoundIcon inherits Rectangle {
+    in property <string> icon;
+    in property <bool> solid;
+    in property <color> tint: Theme.text-secondary;
+    in property <bool> enabled: true;
+    callback clicked(length, length);
+    width: 44px;
+    height: 44px;
+    border-radius: 22px;
+    opacity: root.enabled ? 1 : 0.4;
+    background: ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent);
+    Glyph {
+        x: 11px;
+        y: 11px;
+        size: 22px;
+        solid: root.solid;
+        tint: ta.has-hover && !root.solid ? Theme.text : root.tint;
+        commands: root.icon;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y); }
+    }
+}
+
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked();
+    width: t.preferred-width + 28px;
+    height: 32px;
+    border-radius: 16px;
+    background: root.selected ? Theme.text : (ta.has-hover ? Theme.surface-raised : Theme.surface);
+    t := Label {
+        width: parent.width;
+        height: parent.height;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        text: root.text;
+        font-size: Theme.size-caption;
+        font-weight: Theme.weight-semibold;
+        color: root.selected ? Theme.bg : Theme.text;
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component Field inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text;
+    in property <length> font-size: Theme.size-body;
+    in property <bool> auto-focus;
+    in property <bool> single-line: true;
+    callback edited(string);
+    callback accepted(string);
+    callback key(KeyEvent) -> EventResult;
+    forward-focus: input;
+    height: 40px;
+    border-radius: Theme.radius-control;
+    background: Theme.surface;
+    border-width: input.has-focus ? 1px : 0px;
+    border-color: Theme.text-tertiary;
+    Label {
+        x: Theme.space-md;
+        width: parent.width - 2 * Theme.space-md;
+        height: root.single-line ? parent.height : 24px;
+        y: root.single-line ? 0px : Theme.space-sm;
+        vertical-alignment: center;
+        text: root.placeholder;
+        font-size: root.font-size;
+        color: Theme.text-tertiary;
+        visible: root.text == "";
+    }
+    FocusScope {
+        x: Theme.space-md;
+        width: parent.width - 2 * Theme.space-md;
+        key-pressed(e) => { return root.key(e); }
+        input := TextInput {
+            init => {
+                if (root.auto-focus) {
+                    self.focus();
+                }
+            }
+            y: root.single-line ? 0px : Theme.space-sm;
+            width: parent.width;
+            height: root.single-line ? root.height : root.height - 2 * Theme.space-sm;
+            vertical-alignment: root.single-line ? center : top;
+            font-family: Theme.font-family;
+            font-size: root.font-size;
+            color: Theme.text;
+            selection-background-color: Theme.accent;
+            selection-foreground-color: Theme.on-accent;
+            single-line: root.single-line;
+            wrap: root.single-line ? no-wrap : word-wrap;
+            text <=> root.text;
+            edited => { root.edited(self.text); }
+            accepted => { root.accepted(self.text); }
+        }
+    }
+}
+
+export component Toggle inherits Rectangle {
+    in property <bool> on;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    width: 40px;
+    height: 24px;
+    border-radius: 12px;
+    opacity: root.enabled ? 1 : 0.4;
+    background: root.on ? Theme.accent : Theme.track;
+    animate background { duration: Theme.duration-fast; }
+    Rectangle {
+        x: root.on ? parent.width - self.width - 3px : 3px;
+        y: 3px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: #ffffff;
+        animate x { duration: Theme.duration-fast; easing: Theme.ease; }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.toggled(!root.on); }
+    }
+}
+
+export component SectionTitle inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> more;
+    callback more-clicked();
+    padding-left: Theme.space-2xl;
+    padding-right: Theme.space-2xl;
+    height: 32px;
+    Label {
+        text: root.title;
+        font-size: Theme.size-heading;
+        font-weight: Theme.weight-semibold;
+        letter-spacing: Theme.tracking-heading;
+        vertical-alignment: center;
+    }
+    if root.more != "" : Rectangle {
+        width: more-t.preferred-width;
+        more-t := Caption {
+            height: parent.height;
+            vertical-alignment: center;
+            text: root.more;
+            font-weight: Theme.weight-semibold;
+            color: more-ta.has-hover ? Theme.text : Theme.text-secondary;
+        }
+        more-ta := TouchArea { clicked => { root.more-clicked(); } }
+    }
+}

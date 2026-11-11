@@ -89,7 +89,19 @@ export global Playback {
     in-out property <int> duration-ms;
     in-out property <bool> playing;
     in-out property <bool> shuffle;
-    in-out property <bool> repeat;
+    // 0 off, 1 all, 2 one.
+    in-out property <int> repeat;
+    in-out property <bool> queue-open;
+    in-out property <bool> side-open;
+    // Lyric lines as plain text for the side panel.
+    in property <[string]> lyr-plain;
+    in property <int> lyr-offset;
+    // Podcasts: playback speed and episode state.
+    in property <bool> is-episode;
+    in property <float> speed: 1.0;
+    in property <string> sleep-label;
+    in property <bool> liked;
+    in property <bool> like-known;
     in-out property <float> volume: 0.6;
     in-out property <bool> expanded;
     // The context (playlist / album / liked) the current track was started from.
@@ -122,6 +134,16 @@ export global Playback {
     callback set-volume(float);
     callback toggle-shuffle();
     callback toggle-repeat();
+    callback toggle-queue();
+    callback lyrics-offset(int);
+    callback seek-line(int);
+    callback open-artist();
+    callback speed-menu(length, length);
+    callback sleep-menu(length, length);
+    callback toggle-like();
+    callback mini-player();
+    // Right-click on the bar's track: (x, y) in window coordinates.
+    callback track-menu(length, length);
     callback open-context();
     callback set-karaoke(bool);
     callback set-k-style(string);
@@ -148,6 +170,22 @@ export global Icons {
     out property <string> volume-mute: "M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z M22 9l-6 6 M16 9l6 6";
     out property <string> volume-low: "M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z M16 9a5 5 0 0 1 0 6";
     out property <string> volume-high: "M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z M16 9a5 5 0 0 1 0 6 M19.4 18.4a9 9 0 0 0 0-12.8";
+    out property <string> back: "M15 18l-6-6 6-6";
+    out property <string> forward: "M9 18l6-6-6-6";
+    out property <string> folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z";
+    out property <string> plus: "M12 5v14 M5 12h14";
+    out property <string> pin: "M12 17v5 M9 10.8V5h6v5.8l2 2.2v2H7v-2z";
+    out property <string> moon: "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z";
+    out property <string> gear: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z";
+    out property <string> chart: "M3 3v18h18 M8 16v-5 M13 16V8 M18 16v-9";
+    out property <string> user: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2 M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z";
+    out property <string> library: "M4 4v16 M9 4v16 M14 4l5 16";
+    out property <string> refresh: "M21 12a9 9 0 1 1-2.6-6.4L21 8 M21 3v5h-5";
+    out property <string> music: "M9 18V5l12-2v13 M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M18 19a3 3 0 1 0 0-6 3 3 0 0 0 0 6z";
+    out property <string> mini: "M3 5h18v14H3z M12 12h7v5h-7z";
+    out property <string> close: "M6 6l12 12 M18 6L6 18";
+    out property <string> queue: "M3 6h13 M3 12h13 M3 18h9 M17 15v6l4-3z";
+    out property <string> more: "M5 12h.01 M12 12h.01 M19 12h.01";
     out property <string> mic: "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z M19 10v2a7 7 0 0 1-14 0v-2 M12 19L12 22";
 }
 
@@ -178,8 +216,9 @@ component Icon inherits Path {
 }
 
 // Quiet icon button: hover and press tint the background, hover brightens the glyph.
-component IconButton inherits Rectangle {
+export component IconButton inherits Rectangle {
     in property <string> commands;
+    out property <bool> has-hover: touch.has-hover;
     in property <length> icon-size: 20px;
     in property <bool> solid;
     in property <bool> active;
@@ -344,12 +383,16 @@ export component NowPlayingBar inherits Rectangle {
             width: parent.width - self.x;
             alignment: center;
             spacing: 2px;
-            Text {
-                text: Playback.title;
-                color: Theme.text;
-                font-size: Theme.size-body;
-                font-weight: Theme.weight-semibold;
-                overflow: elide;
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: Playback.title;
+                    color: Theme.text;
+                    font-size: Theme.size-body;
+                    font-weight: Theme.weight-semibold;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
             }
             Text {
                 text: Playback.artist;
@@ -360,9 +403,15 @@ export component NowPlayingBar inherits Rectangle {
             }
         }
         TouchArea {
+            width: parent.width - (Playback.like-known ? 40px : 0px);
             enabled: !root.idle;
             mouse-cursor: MouseCursor.pointer;
             clicked => { Playback.expanded = true; }
+            pointer-event(e) => {
+                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                    Playback.track-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
+            }
         }
     }
 
@@ -413,10 +462,27 @@ export component NowPlayingBar inherits Rectangle {
             IconButton {
                 y: (parent.height - self.height) / 2;
                 commands: Icons.repeat;
-                active: Playback.repeat;
+                active: Playback.repeat > 0;
                 active-color: root.accent;
                 enabled: !root.idle;
                 clicked => { Playback.toggle-repeat(); }
+                // Repeat one.
+                if Playback.repeat == 2 : Rectangle {
+                    x: parent.width - 15px;
+                    y: 3px;
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 6px;
+                    background: root.accent;
+                    Text {
+                        text: "1";
+                        font-size: 9px;
+                        font-weight: 700;
+                        color: Theme.on-accent;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
             }
         }
         HorizontalLayout {
@@ -451,6 +517,17 @@ export component NowPlayingBar inherits Rectangle {
         }
     }
 
+    // Like the current track (Web API; hidden until its state is known).
+    if Playback.like-known && !root.idle : IconButton {
+        x: Theme.space-xl + root.side-w - 36px;
+        y: (root.height - self.height) / 2;
+        commands: Icons.heart;
+        solid: Playback.liked;
+        active: Playback.liked;
+        active-color: root.accent;
+        clicked => { Playback.toggle-like(); }
+    }
+
     // Right: volume (click the speaker to mute) and expand.
     HorizontalLayout {
         x: root.width - Theme.space-xl - root.side-w;
@@ -459,11 +536,62 @@ export component NowPlayingBar inherits Rectangle {
         height: 36px;
         alignment: end;
         spacing: Theme.space-xs;
-        // Opens the playlist / album the current track was started from.
+        if Playback.is-episode : Rectangle {
+            width: 44px;
+            height: 36px;
+            border-radius: Theme.radius-control;
+            background: sp-ta.has-hover ? Theme.hover : transparent;
+            Text {
+                text: Playback.speed == 1 ? "1×" : Math.round(Playback.speed * 100) / 100 + "×";
+                color: Playback.speed == 1 ? Theme.text-secondary : root.accent;
+                font-size: Theme.size-caption;
+                font-weight: Theme.weight-semibold;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            sp-ta := TouchArea { clicked => { Playback.speed-menu(self.absolute-position.x, self.absolute-position.y - 8px); } }
+        }
+        Rectangle {
+            width: Playback.sleep-label != "" ? 36px + sl.preferred-width + 4px : 36px;
+            height: 36px;
+            border-radius: Theme.radius-control;
+            background: sleep-ta.has-hover ? Theme.hover : transparent;
+            Path {
+                x: 8px; y: 8px; width: 20px; height: 20px;
+                viewbox-width: 24; viewbox-height: 24;
+                commands: Icons.moon;
+                fill: transparent;
+                stroke: Playback.sleep-label != "" ? root.accent : (sleep-ta.has-hover ? Theme.text : Theme.text-secondary);
+                stroke-width: 1.5px;
+                stroke-line-cap: round;
+                stroke-line-join: round;
+            }
+            sl := Text {
+                x: 34px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: Playback.sleep-label;
+                color: root.accent;
+                font-size: Theme.size-caption;
+                font-weight: Theme.weight-semibold;
+            }
+            sleep-ta := TouchArea { clicked => { Playback.sleep-menu(self.absolute-position.x, self.absolute-position.y - 8px); } }
+        }
         IconButton {
-            commands: Icons.playlist;
-            enabled: Playback.context-uri != "";
-            clicked => { Playback.open-context(); }
+            commands: Icons.queue;
+            active: Playback.queue-open;
+            active-color: root.accent;
+            clicked => { Playback.toggle-queue(); }
+        }
+        if root.side-w >= 296px : IconButton {
+            commands: Icons.music;
+            active: Playback.side-open;
+            active-color: root.accent;
+            clicked => { Playback.side-open = !Playback.side-open; }
+        }
+        if root.side-w >= 296px : IconButton {
+            commands: Icons.mini;
+            clicked => { Playback.mini-player(); }
         }
         IconButton {
             commands: Icons.lyrics;
@@ -487,7 +615,7 @@ export component NowPlayingBar inherits Rectangle {
             }
         }
         Scrubber {
-            width: Math.max(72px, Math.min(120px, root.side-w - 4 * 36px - 4 * Theme.space-xs));
+            width: Math.max(56px, Math.min(120px, root.side-w - 7 * 36px - 7 * Theme.space-xs));
             y: 8px;
             value: Playback.volume;
             fill-color: root.accent;
