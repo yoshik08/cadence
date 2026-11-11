@@ -145,6 +145,9 @@ pub fn refresh(ui: Weak<MainWindow>, rt: &tokio::runtime::Handle) {
         };
         *lock(&QUEUED) = queued.iter().map(|q| q.uri.clone()).collect();
         FROM_QUEUE.store(snap.current.as_ref().is_some_and(|c| c.queued), Ordering::Relaxed);
+        // Player bar "Autoplaying similar songs": the current track's provider is autoplay.
+        let autoplaying = snap.current.as_ref().is_some_and(|c| c.autoplay);
+        let _ = ui.upgrade_in_event_loop(move |ui| ui.global::<crate::Playback>().set_autoplaying(autoplaying));
         save_now(&p);
         if !PANEL_OPEN.load(Ordering::Relaxed) {
             return;

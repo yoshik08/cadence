@@ -115,6 +115,8 @@ export global Playback {
     in-out property <bool> expanded;
     // The context (playlist / album / liked) the current track was started from.
     in property <string> context-uri;
+    // The playing track comes from Spotify's autoplay (similar songs after the context ended).
+    in property <bool> autoplaying;
     // Links for the playing track. The album link stays off until its ID is known.
     in property <string> album-uri;
     in property <[ArtistLink]> artists;
@@ -457,6 +459,12 @@ export component NowPlayingBar inherits Rectangle {
                 artists: Playback.artists;
                 fallback: Playback.artist;
                 open(uri) => { Playback.open-uri(uri); }
+            }
+            if Playback.autoplaying && !root.idle : Text {
+                text: "Autoplaying similar songs";
+                font-size: Tokens.size-caption;
+                color: Tokens.text-tertiary;
+                overflow: elide;
             }
         }
         if Playback.like-known && !root.idle : IconButton {
