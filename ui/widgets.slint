@@ -3,8 +3,9 @@ import { Tokens } from "tokens.slint";
 import { Cover } from "cover.slint";
 import { Icons } from "now_playing.slint";
 import { Label, Caption, Glyph, ListRow, Button, IconButton, SectionHeader } from "base.slint";
+import { Song, TrackRow, Badge, Explicit, SongColumns, SongCols } from "track_row.slint";
 
-export { Label, Caption, Glyph, ListRow, Button, IconButton, SectionHeader }
+export { Label, Caption, Glyph, ListRow, Button, IconButton, SectionHeader, Song, TrackRow, Explicit }
 
 export struct Card {
     title: string,
@@ -20,27 +21,6 @@ export struct Card {
     fresh: bool,
 }
 
-export struct TrackRow {
-    title: string,
-    artist: string,
-    album: string,
-    added: string,
-    duration: string,
-    uri: string,
-    explicit: bool,
-    liked: bool,
-    // The liked state is known (hearts stay hidden until it is).
-    liked-known: bool,
-    // Position in the playing context (rows can be sorted differently).
-    index: int,
-    unavailable: bool,
-    local: bool,
-    // Find section: already in the playlist. Episodes: played.
-    marked: bool,
-    // Episodes: 0..1 listened.
-    progress: float,
-    note: string,
-}
 
 export struct ShelfData {
     key: string,
@@ -247,33 +227,7 @@ export component Shelf inherits Rectangle {
     }
 }
 
-// Small outlined or filled tag ("E", "LOCAL").
-component Badge inherits Rectangle {
-    in property <string> text;
-    in property <bool> filled;
-    width: max(Tokens.icon-sm, label.preferred-width + Tokens.space-sm);
-    height: Tokens.icon-sm;
-    border-radius: Tokens.radius-sm;
-    border-width: root.filled ? 0px : Tokens.hairline;
-    border-color: Tokens.text-tertiary;
-    background: root.filled ? Tokens.text-tertiary : transparent;
-    label := Text {
-        text: root.text;
-        font-size: Tokens.size-micro;
-        font-weight: Tokens.weight-bold;
-        color: root.filled ? Tokens.text-inverse : Tokens.text-tertiary;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-}
-
-// Explicit badge.
-export component Explicit inherits Badge {
-    text: "E";
-    filled: true;
-}
-
-// Column geometry shared by the track rows and their header, so they always line up.
+// Column geometry of the search page's rows (Part 3 moves search to TrackRow).
 global TrackColumns {
     out property <length> pad: Tokens.space-lg;
     out property <length> gap: Tokens.space-lg;
@@ -288,10 +242,9 @@ global TrackColumns {
     out property <float> title-share: 0.6;
 }
 
-// One row of a track table. Columns are placed by hand so every row lines up; album and date
-// columns hide on narrow widths or when the page has none.
+// The search page's song row (search moves to TrackRow in Part 3; everything else uses it now).
 export component TrackItem inherits Rectangle {
-    in property <TrackRow> item;
+    in property <Song> item;
     in property <int> number;
     in property <bool> show-album: true;
     in property <bool> show-added;
@@ -480,7 +433,8 @@ component HeaderCol inherits Rectangle {
     }
 }
 
-// Column header for track tables; clicking a column sorts by it.
+// Column header for the song table; same geometry as TrackRow's table variant. Clicking a
+// column sorts by it.
 export component TableHeader inherits Rectangle {
     in property <bool> show-album: true;
     in property <bool> show-added;
@@ -489,32 +443,20 @@ export component TableHeader inherits Rectangle {
     in property <bool> sort-desc;
     in property <bool> sortable: true;
     callback sort(string);
+    property <SongCols> c: SongColumns.table(root.width, true, root.show-album, root.show-added, root.show-heart, false, 0px);
     height: Tokens.row-sm;
-    property <bool> wide: root.width >= TrackColumns.wide-from;
-    property <length> pad: TrackColumns.pad;
-    property <length> idx-w: TrackColumns.index-width;
-    property <length> dur-w: TrackColumns.duration-width;
-    property <length> heart-w: root.show-heart ? TrackColumns.heart-width : 0px;
-    property <length> added-w: root.show-added && root.wide ? TrackColumns.added-width : 0px;
-    property <bool> album-on: root.show-album && root.width >= TrackColumns.album-from;
-    property <length> gap: TrackColumns.gap;
-    property <length> inner-w: root.width - 2 * Tokens.space-lg;
-    property <length> avail: inner-w - 2 * pad - idx-w - dur-w - heart-w - added-w - 4 * gap;
-    property <length> title-w: root.album-on ? avail * TrackColumns.title-share : avail;
-    property <length> album-w: avail * (1 - TrackColumns.title-share) - gap;
-    property <length> title-x: Tokens.space-lg + pad + idx-w + gap;
-    property <length> album-x: title-x + title-w + gap;
-    property <length> added-x: album-x + (root.album-on ? album-w + gap : 0px);
-    // Room for the sort arrow left of the right-aligned "Time".
-    property <length> time-extra: 20px;
-    Rectangle { y: parent.height - Tokens.hairline; height: Tokens.hairline; x: Tokens.space-lg; width: root.inner-w; background: Tokens.border; }
-
-    HeaderCol { x: Tokens.space-lg + root.pad; width: root.idx-w; label: "#"; key: ""; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
-    HeaderCol { x: root.title-x; width: root.title-w * 0.5; label: "Title"; key: "title"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
-    HeaderCol { x: root.title-x + root.title-w * 0.5; width: root.title-w * 0.5; label: "Artist"; key: "artist"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
-    if root.album-on : HeaderCol { x: root.album-x; width: root.album-w; label: "Album"; key: "album"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
-    if root.added-w > 0 : HeaderCol { x: root.added-x; width: root.added-w; label: "Date added"; key: "added"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
-    HeaderCol { x: root.width - Tokens.space-lg - root.pad - root.dur-w - root.time-extra; width: root.dur-w + root.time-extra; label: "Time"; key: "duration"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; align-right: true; pick(k) => { root.sort(k); } }
+    Rectangle {
+        y: parent.height - Tokens.hairline;
+        height: Tokens.hairline;
+        x: SongColumns.inset;
+        width: root.width - 2 * SongColumns.inset;
+        background: Tokens.border;
+    }
+    HeaderCol { x: root.c.index-x; width: SongColumns.index-width; label: "#"; key: ""; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
+    HeaderCol { x: root.c.title-x; width: root.c.title-w; label: "Title"; key: "title"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
+    if root.c.album-on : HeaderCol { x: root.c.album-x; width: root.c.album-w; label: "Album"; key: "album"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
+    if root.c.added-w > 0 : HeaderCol { x: root.c.added-x; width: root.c.added-w; label: "Date added"; key: "added"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; pick(k) => { root.sort(k); } }
+    HeaderCol { x: root.c.duration-x; width: SongColumns.duration-width; label: "Time"; key: "duration"; current: root.sort-key; desc: root.sort-desc; enabled: root.sortable; align-right: true; pick(k) => { root.sort(k); } }
 }
 
 export component Chip inherits Rectangle {

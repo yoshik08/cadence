@@ -5,11 +5,11 @@ import { ScrollView, ListView, Palette } from "std-widgets.slint";
 import { Icons, Playback } from "now_playing.slint";
 import { Menu } from "menu.slint";
 import {
-    Card, TrackRow, ShelfData, Label, Caption, Glyph, ListRow, Button, IconButton, SectionHeader,
-    PageFade, ArtTile, CardView, Shelf, TrackItem, TableHeader, Chip, Field
+    Card, Song, ShelfData, Label, Caption, Glyph, ListRow, Button, IconButton, SectionHeader,
+    PageFade, ArtTile, CardView, Shelf, TrackItem, TrackRow, TableHeader, Chip, Field
 } from "widgets.slint";
 
-export { Card, TrackRow, ShelfData }
+export { Card, Song, ShelfData }
 
 export struct SideItem {
     title: string,
@@ -54,6 +54,11 @@ export global Browse {
     callback open(string);
     callback go(string);
     callback play(string, int);
+    // A row's play button: (context, row index, track uri). Pauses or resumes when the row is the
+    // current track, else plays it like a double-click.
+    callback row-toggle(string, int, string);
+    // The selected row of the song table (click selects; Up / Down move; Enter plays).
+    in-out property <int> sel-row: -1;
     callback play-all(string, bool);
     callback play-card(string);
     callback card-menu(string, length, length);
@@ -80,7 +85,7 @@ export global Browse {
     in-out property <string> query;
     in property <bool> has-top;
     in property <Card> top;
-    in property <[TrackRow]> found-tracks;
+    in property <[Song]> found-tracks;
     in property <[ShelfData]> found-shelves;
     in property <[string]> history;
     in property <string> search-note;
@@ -118,7 +123,7 @@ export global Browse {
     in property <bool> list-can-save;
     in property <bool> list-playable: true;
     in property <bool> list-more;
-    in property <[TrackRow]> tracks;
+    in property <[Song]> tracks;
     in property <[Card]> list-cards;
     in property <string> sort-key;
     in property <bool> sort-desc;
@@ -129,7 +134,7 @@ export global Browse {
     callback load-more();
     callback open-owner();
     // Find something for your playlist
-    in property <[TrackRow]> find-tracks;
+    in property <[Song]> find-tracks;
     in property <[Card]> find-cards;
     in property <string> find-note;
     in property <string> find-expanded;
@@ -139,7 +144,7 @@ export global Browse {
     callback find-expand(string);
 
     // Artist
-    in property <[TrackRow]> popular;
+    in property <[Song]> popular;
     in property <string> popular-title: "Popular";
     in property <string> popular-note;
     in property <[Card]> disc;
@@ -851,18 +856,31 @@ component FindSection inherits VerticalLayout {
             clicked => { Browse.find-expand(c.uri); }
         }
     }
-    for t[i] in Browse.find-tracks : TrackItem {
+    for t[i] in Browse.find-tracks : TrackRow {
         item: t;
-        number: 0;
+        variant: "list";
         show-heart: false;
         action-label: "Add";
+        current: t.uri != "" && t.uri == Browse.current-uri;
+        playing: Playback.playing;
         double-clicked => { Browse.play(t.uri, 0); }
+        play-pause => { Browse.row-toggle(t.uri, 0, t.uri); }
         action => { Browse.find-add(i); }
         menu(x, y) => { Menu.for-item(t.uri, "", -1, "", x, y); }
+        more(x, y) => { Menu.for-item(t.uri, "", -1, "", x, y); }
     }
 }
 
 component ListPage inherits PageFade {
+    // Scrolls the song table so the selected row is in view (`h`: the list's height).
+    function reveal(h: length) {
+        let top = Browse.sel-row * Tokens.row-track;
+        if (top < -Browse.scroll-y) {
+            Browse.scroll-y = -top;
+        } else if (top + Tokens.row-track > -Browse.scroll-y + h) {
+            Browse.scroll-y = -(top + Tokens.row-track - h);
+        }
+    }
     property <bool> episodes: Browse.list-kind == "show";
     property <bool> with-added: Browse.list-kind == "playlist" || Browse.list-kind == "liked";
     property <bool> with-album: Browse.list-kind != "album" && !root.episodes;
@@ -887,20 +905,53 @@ component ListPage inherits PageFade {
             sortable: Browse.list-kind == "playlist" || Browse.list-kind == "liked" || Browse.list-kind == "local";
             sort(k) => { Browse.sort-by(k); }
         }
-        // Virtualized: only the visible rows exist, for any list length.
-        if !root.finding && !root.card-page : ListView {
+        // Virtualized: only the visible rows exist, for any list length. The FocusScope takes
+        // Up / Down / Enter for the selected row; everything else (Space) goes on to the window.
+        if !root.finding && !root.card-page : songs := FocusScope {
             vertical-stretch: 1;
-            content-y <=> Browse.scroll-y;
-            for t[i] in Browse.tracks : TrackItem {
-                item: t;
-                number: i + 1;
-                show-album: root.with-album;
-                show-added: root.with-added;
-                show-heart: !root.episodes && Browse.list-kind != "local";
-                playing: t.uri != "" && t.uri == Browse.current-uri;
-                double-clicked => { Browse.play(Browse.list-uri, i); }
-                heart => { Browse.track-heart(i); }
-                menu(x, y) => { Menu.for-item(t.uri, Browse.list-uri, i, "", x, y); }
+            key-pressed(e) => {
+                if (e.text == Key.DownArrow && Browse.tracks.length > 0) {
+                    Browse.sel-row = Math.min(Browse.sel-row + 1, Browse.tracks.length - 1);
+                    root.reveal(self.height);
+                    return accept;
+                }
+                if (e.text == Key.UpArrow && Browse.tracks.length > 0) {
+                    Browse.sel-row = Math.max(Browse.sel-row - 1, 0);
+                    root.reveal(self.height);
+                    return accept;
+                }
+                if (e.text == Key.Return && Browse.sel-row >= 0 && Browse.sel-row < Browse.tracks.length) {
+                    if (!Browse.tracks[Browse.sel-row].unavailable) {
+                        Browse.play(Browse.list-uri, Browse.sel-row);
+                    }
+                    return accept;
+                }
+                return reject;
+            }
+            ListView {
+                width: parent.width;
+                height: parent.height;
+                content-y <=> Browse.scroll-y;
+                for t[i] in Browse.tracks : TrackRow {
+                    item: t;
+                    number: i + 1;
+                    variant: "table";
+                    show-album: root.with-album;
+                    show-added: root.with-added;
+                    show-heart: !root.episodes && Browse.list-kind != "local";
+                    selected: Browse.sel-row == i;
+                    current: t.uri != "" && t.uri == Browse.current-uri;
+                    playing: Playback.playing;
+                    clicked => {
+                        Browse.sel-row = i;
+                        songs.focus();
+                    }
+                    double-clicked => { Browse.play(Browse.list-uri, i); }
+                    play-pause => { Browse.row-toggle(Browse.list-uri, i, t.uri); }
+                    heart => { Browse.track-heart(i); }
+                    menu(x, y) => { Menu.for-item(t.uri, Browse.list-uri, i, "", x, y); }
+                    more(x, y) => { Menu.for-item(t.uri, Browse.list-uri, i, "", x, y); }
+                }
             }
         }
         // Card results ("Show all"), virtualized by grid row.
@@ -993,14 +1044,16 @@ component ArtistPage inherits PageFade {
             padding-left: Tokens.page-margin;
             Caption { text: Browse.popular-note; wrap: word-wrap; }
         }
-        for t[i] in Browse.popular : TrackItem {
+        for t[i] in Browse.popular : TrackRow {
             item: t;
-            number: i + 1;
-            show-album: true;
-            playing: t.uri == Browse.current-uri;
+            variant: "list";
+            current: t.uri == Browse.current-uri;
+            playing: Playback.playing;
             double-clicked => { Browse.play("popular", i); }
+            play-pause => { Browse.row-toggle("popular", i, t.uri); }
             heart => { Browse.track-heart(-1 - i); }
             menu(x, y) => { Menu.for-item(t.uri, "", -1, "", x, y); }
+            more(x, y) => { Menu.for-item(t.uri, "", -1, "", x, y); }
         }
         Rectangle { height: Tokens.space-xl; }
         SectionHeader { title: "Discography"; }

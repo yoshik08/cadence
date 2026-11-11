@@ -1,0 +1,438 @@
+// TrackRow: the one song row. Used by Liked Songs, playlists, albums, artist Popular tracks, the
+// Add-songs finder and the queue; exported for the search page (Part 3).
+//
+//   list:  [48 cover] [title / E artist] ............ [heart] [duration] [more]
+//   table: [#] [40 cover + title / E artist] [album] [date added] [heart] [duration] [more]
+//
+// Play button: the cover (list) or the # cell (table). Hover shows the play triangle; the current
+// track shows an equalizer while playing (pause on hover) and its number or triangle in the
+// accent colour while paused. Only opacity and colour change on hover, so nothing reflows.
+import { Tokens } from "tokens.slint";
+import { Cover } from "cover.slint";
+import { Icons } from "now_playing.slint";
+import { Label, Caption, Glyph, ListRow, IconButton, TipArea } from "base.slint";
+
+export struct Song {
+    title: string,
+    artist: string,
+    album: string,
+    added: string,
+    duration: string,
+    uri: string,
+    explicit: bool,
+    liked: bool,
+    // The liked state is known (hearts stay hidden until it is).
+    liked-known: bool,
+    // Position in the playing context (rows can be sorted differently).
+    index: int,
+    unavailable: bool,
+    local: bool,
+    // Find section: already in the playlist. Episodes: played.
+    marked: bool,
+    // Episodes: 0..1 listened.
+    progress: float,
+    note: string,
+    // Cover; `fresh` art was downloaded just now and fades in (cached art appears at once).
+    art: image,
+    fresh: bool,
+}
+
+// Small outlined or filled tag ("E", "LOCAL").
+export component Badge inherits Rectangle {
+    in property <string> text;
+    in property <bool> filled;
+    width: max(Tokens.icon-sm, label.preferred-width + Tokens.space-sm);
+    height: Tokens.icon-sm;
+    border-radius: Tokens.radius-sm;
+    border-width: root.filled ? 0px : Tokens.hairline;
+    border-color: Tokens.text-tertiary;
+    background: root.filled ? Tokens.text-tertiary : transparent;
+    label := Text {
+        text: root.text;
+        font-size: Tokens.size-micro;
+        font-weight: Tokens.weight-bold;
+        color: root.filled ? Tokens.text-inverse : Tokens.text-tertiary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component Explicit inherits Badge {
+    text: "E";
+    filled: true;
+}
+
+// Where every column of the song table sits, for one row width. The header and the rows both
+// call `SongColumns.table`, so they always line up.
+export struct SongCols {
+    // Row content: inset from the list edge, plus padding.
+    x0: length,
+    right: length,
+    index-x: length,
+    title-x: length,
+    title-w: length,
+    album-on: bool,
+    album-x: length,
+    album-w: length,
+    added-x: length,
+    added-w: length,
+    action-x: length,
+    heart-x: length,
+    duration-x: length,
+    more-x: length,
+}
+
+export global SongColumns {
+    out property <length> inset: Tokens.space-lg;
+    out property <length> pad: Tokens.space-sm;
+    out property <length> gap: Tokens.space-md;
+    out property <length> index-width: 28px;
+    out property <length> duration-width: 52px;
+    out property <length> button-width: Tokens.control-sm;
+    out property <length> action-width: 72px;
+    out property <length> added-width: 112px;
+    // Below these row widths the date column, then the album column, are dropped.
+    out property <length> wide-from: 860px;
+    out property <length> album-from: 640px;
+    out property <float> title-share: 0.6;
+    // Cover sizes. Rust picks the art for these (browse::TABLE_ART / LIST_ART).
+    out property <length> table-art: 40px;
+    out property <length> list-art: 48px;
+
+    public pure function table(width: length, table: bool, show-album: bool, show-added: bool, show-heart: bool, has-action: bool, lead: length) -> SongCols {
+        let x0 = self.inset + self.pad;
+        let right = width - self.inset - self.pad;
+        let more-x = right - self.button-width;
+        let duration-x = more-x - self.duration-width;
+        let heart-x = duration-x - (show-heart ? self.button-width : 0px);
+        let action-x = heart-x - (has-action ? self.action-width : 0px);
+        let added-w = table && show-added && width >= self.wide-from ? self.added-width : 0px;
+        let title-x = table ? x0 + self.index-width + self.gap : x0 + lead;
+        let album-on = table && show-album && width >= self.album-from;
+        let cols-w = max(0px, action-x - self.gap - title-x - (added-w > 0px ? added-w + self.gap : 0px));
+        let title-w = album-on ? (cols-w - self.gap) * self.title-share : cols-w;
+        let album-w = album-on ? (cols-w - self.gap) * (1 - self.title-share) : 0px;
+        let album-x = title-x + title-w + self.gap;
+        return {
+            x0: x0,
+            right: right,
+            index-x: x0,
+            title-x: title-x,
+            title-w: title-w,
+            album-on: album-on,
+            album-x: album-x,
+            album-w: album-w,
+            added-x: album-on ? album-x + album-w + self.gap : title-x + title-w + self.gap,
+            added-w: added-w,
+            action-x: action-x,
+            heart-x: heart-x,
+            duration-x: duration-x,
+            more-x: more-x,
+        };
+    }
+}
+
+// Three bars that step to new heights 8 times a second. Exists only on the current row while it
+// plays, so nothing ticks otherwise; no tween between steps, so each step is one frame.
+export component Equalizer inherits Rectangle {
+    in property <color> tint: Tokens.accent;
+    property <int> step;
+    property <duration> interval: 125ms;
+    property <length> bar: 2px;
+    width: Tokens.icon-xs;
+    height: Tokens.icon-xs;
+    Timer {
+        interval: root.interval;
+        running: true;
+        triggered => { root.step += 1; }
+    }
+    for k in 3 : Rectangle {
+        x: k * (root.width - root.bar) / 2;
+        width: root.bar;
+        // Pseudo-random heights from 2/8 to 8/8 of the box, different per bar.
+        height: root.height * (Math.mod(root.step * (2 * k + 3) + 5 * k, 7) + 2) / 8;
+        y: root.height - self.height;
+        border-radius: Tokens.radius-full;
+        background: root.tint;
+    }
+}
+
+export component TrackRow inherits Rectangle {
+    in property <Song> item;
+    in property <int> number;
+    // "list" or "table".
+    in property <string> variant: "table";
+    in property <bool> show-album: true;
+    in property <bool> show-added;
+    in property <bool> show-heart: true;
+    in property <bool> show-more: true;
+    in property <bool> selected;
+    // This row is the track loaded now, and it is playing.
+    in property <bool> current;
+    in property <bool> playing;
+    // Find section: an "Add" button per row.
+    in property <string> action-label;
+    // Queue: a remove button, room before the cover for the drag handle, the lifted look.
+    in property <bool> removable;
+    in property <length> lead;
+    in property <bool> lifted;
+    callback clicked();
+    callback double-clicked();
+    // Play / pause from this row's play button.
+    callback play-pause();
+    callback menu(length, length);
+    callback more(length, length);
+    callback heart();
+    callback action();
+    callback remove();
+    // Queue drag: every pointer event and move on the row, with the pointer's y in the row.
+    callback pointer(PointerEvent, length);
+    callback dragged(length, bool);
+
+    property <bool> table: root.variant == "table";
+    property <SongCols> c: SongColumns.table(root.width, root.table, root.show-album, root.show-added, root.show-heart, root.action-label != "", root.lead);
+    property <length> art-size: root.table ? SongColumns.table-art : SongColumns.list-art;
+    property <length> art-x: root.table ? root.c.title-x : root.c.x0 + root.lead;
+    property <length> text-x: root.art-x + root.art-size + Tokens.space-md;
+    property <length> text-w: (root.table ? root.c.title-x + root.c.title-w : root.c.action-x - Tokens.space-md) - root.text-x;
+    property <bool> enabled: !root.item.unavailable;
+    out property <bool> hovered: root.hot;
+    property <bool> hot: ta.has-hover || play.has-hover || heart-ta.has-hover || more-btn.has-hover || act-ta.has-hover;
+    // The play button shows: triangle on hover, pause on hover while playing.
+    property <bool> pausing: root.current && root.playing;
+    property <bool> eq: root.pausing && !(root.hot && root.enabled);
+    property <float> unavailable-opacity: 0.45;
+    property <length> mark: Tokens.icon-xs;
+    property <length> progress-width: 120px;
+    property <length> action-height: 30px;
+    // The art's corners are painted in the colour behind them, which follows the row state.
+    property <color> behind: root.lifted || root.selected ? Tokens.bg-elevated
+        : ta.pressed ? Tokens.text-primary.mix(Tokens.bg-base, 0.12)
+        : root.hot ? Tokens.text-primary.mix(Tokens.bg-base, 0.06)
+        : Tokens.bg-base;
+
+    height: Tokens.row-track;
+    opacity: root.enabled ? 1 : root.unavailable-opacity;
+
+    ListRow {
+        x: SongColumns.inset;
+        width: parent.width - 2 * SongColumns.inset;
+        border-radius: Tokens.radius-sm;
+        hovered: root.hot;
+        pressed: ta.pressed;
+        selected: root.selected || root.lifted;
+        drop-shadow-blur: root.lifted ? Tokens.shadow-blur : 0px;
+        drop-shadow-color: Tokens.shadow;
+    }
+
+    // Number (table only).
+    if root.table && !(root.hot && root.enabled) && !root.eq && !root.current : Label {
+        x: root.c.index-x;
+        width: SongColumns.index-width;
+        y: (parent.height - self.height) / 2;
+        text: root.number > 0 ? "\{root.number}" : "";
+        color: Tokens.text-tertiary;
+    }
+    if root.table && !(root.hot && root.enabled) && !root.eq && root.current : Label {
+        x: root.c.index-x;
+        width: SongColumns.index-width;
+        y: (parent.height - self.height) / 2;
+        text: root.number > 0 ? "\{root.number}" : "";
+        color: Tokens.accent;
+    }
+
+    // Cover.
+    Cover {
+        x: root.art-x;
+        y: (parent.height - self.height) / 2;
+        width: root.art-size;
+        height: root.art-size;
+        radius: Tokens.radius-sm;
+        backdrop: root.behind;
+        source: root.item.art;
+        fade: root.item.fresh;
+        if !self.has-art : Glyph {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            size: parent.width / 2;
+            commands: Icons.music;
+            tint: Tokens.text-tertiary;
+        }
+    }
+    // List: the play state sits on the cover, over a dimming scrim.
+    if !root.table && root.enabled && (root.hot || root.current) : Rectangle {
+        x: root.art-x;
+        y: (parent.height - root.art-size) / 2;
+        width: root.art-size;
+        height: root.art-size;
+        border-radius: Tokens.radius-sm;
+        background: Tokens.art-scrim;
+    }
+
+    // The play / pause / equalizer glyph: in the # cell (table) or on the cover (list).
+    property <length> glyph-x: root.table ? root.c.index-x : root.art-x;
+    property <length> glyph-w: root.table ? SongColumns.index-width : root.art-size;
+    property <bool> show-glyph: root.enabled && (root.table ? root.hot : (root.hot || root.current));
+    if root.eq : Equalizer {
+        x: root.glyph-x + (root.table ? 0px : (root.glyph-w - self.width) / 2);
+        y: (parent.height - self.height) / 2;
+    }
+    if root.show-glyph && !root.eq : Glyph {
+        x: root.glyph-x + (root.table ? 0px : (root.glyph-w - self.width) / 2);
+        y: (parent.height - self.height) / 2;
+        size: Tokens.icon-md;
+        solid: true;
+        commands: root.pausing ? Icons.pause : Icons.play;
+        tint: root.table ? (root.current ? Tokens.accent : Tokens.text-primary) : Tokens.text-bright;
+    }
+
+    // Title and subtitle.
+    VerticalLayout {
+        x: root.text-x;
+        width: max(0px, root.text-w);
+        alignment: center;
+        spacing: Tokens.space-2xs;
+        Label {
+            text: root.item.title;
+            font-weight: Tokens.weight-medium;
+            color: root.current ? Tokens.accent : Tokens.text-primary;
+        }
+        HorizontalLayout {
+            spacing: Tokens.space-xs;
+            if root.item.explicit : Explicit { y: Tokens.hairline; }
+            if root.item.local : Badge { text: "LOCAL"; }
+            Caption {
+                text: root.item.note != "" ? root.item.note : root.item.artist;
+                horizontal-stretch: 1;
+            }
+        }
+        if root.item.progress > 0 : Rectangle {
+            height: Tokens.track-height;
+            width: root.progress-width;
+            border-radius: Tokens.radius-full;
+            background: Tokens.bg-track;
+            Rectangle { x: 0; width: parent.width * Math.min(1, root.item.progress); border-radius: Tokens.radius-full; background: Tokens.accent; }
+        }
+    }
+    if root.c.album-on : Caption {
+        x: root.c.album-x;
+        width: root.c.album-w;
+        y: (parent.height - self.height) / 2;
+        font-size: Tokens.size-body;
+        text: root.item.album;
+    }
+    if root.c.added-w > 0 : Caption {
+        x: root.c.added-x;
+        width: root.c.added-w;
+        y: (parent.height - self.height) / 2;
+        text: root.item.added;
+        color: Tokens.text-tertiary;
+    }
+
+    // The row itself: select, play, menus, queue drag.
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => {
+            if (root.enabled) {
+                root.double-clicked();
+            }
+        }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+            root.pointer(e, self.mouse-y);
+        }
+        moved => { root.dragged(self.mouse-y, self.pressed); }
+    }
+    play := TipArea {
+        x: root.glyph-x;
+        y: (parent.height - self.height) / 2;
+        width: root.glyph-w;
+        height: root.table ? root.height : root.art-size;
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        tip: (root.pausing ? "Pause " : "Play ") + root.item.title;
+        clicked => {
+            self.hide-tip();
+            root.play-pause();
+        }
+    }
+
+    // Trailing: action, heart, duration, more, remove.
+    if root.action-label != "" : Rectangle {
+        x: root.c.action-x + Tokens.space-xs;
+        y: (parent.height - self.height) / 2;
+        width: SongColumns.action-width - Tokens.space-md;
+        height: root.action-height;
+        border-radius: Tokens.radius-full;
+        border-width: Tokens.hairline;
+        border-color: root.item.marked ? Tokens.border : Tokens.text-tertiary;
+        background: act-ta.pressed ? Tokens.bg-pressed : act-ta.has-hover ? Tokens.bg-hover : transparent;
+        animate background { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+        Label {
+            width: parent.width;
+            height: parent.height;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            font-size: Tokens.size-caption;
+            font-weight: Tokens.weight-semibold;
+            text: root.item.marked ? "Added" : root.action-label;
+            color: root.item.marked ? Tokens.text-tertiary : Tokens.text-primary;
+        }
+    }
+    act-ta := TouchArea {
+        x: root.c.action-x;
+        width: root.action-label != "" ? SongColumns.action-width : 0px;
+        enabled: root.action-label != "";
+        clicked => { root.action(); }
+    }
+    Rectangle {
+        x: root.c.heart-x;
+        y: (parent.height - self.height) / 2;
+        width: root.show-heart ? SongColumns.button-width : 0px;
+        height: SongColumns.button-width;
+        border-radius: Tokens.radius-full;
+        visible: root.show-heart && root.item.liked-known;
+        opacity: root.item.liked || root.hot ? 1 : 0;
+        background: heart-ta.pressed ? Tokens.bg-pressed : heart-ta.has-hover ? Tokens.bg-hover : transparent;
+        animate background { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+        Glyph {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            size: Tokens.icon-md;
+            solid: root.item.liked;
+            tint: root.item.liked ? Tokens.accent : (heart-ta.has-hover ? Tokens.text-primary : Tokens.text-secondary);
+            commands: Icons.heart;
+        }
+        heart-ta := TouchArea {
+            enabled: root.show-heart && root.item.liked-known;
+            clicked => { root.heart(); }
+        }
+    }
+    Label {
+        x: root.c.duration-x;
+        width: SongColumns.duration-width;
+        y: (parent.height - self.height) / 2;
+        text: root.item.duration;
+        color: Tokens.text-tertiary;
+        horizontal-alignment: right;
+    }
+    more-btn := IconButton {
+        x: root.c.more-x + (SongColumns.button-width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        round: true;
+        size: SongColumns.button-width;
+        icon-size: Tokens.icon-md;
+        icon: root.removable ? Icons.close : Icons.more;
+        visible: root.show-more || root.removable;
+        opacity: root.hot ? 1 : 0;
+        clicked-at(x, y) => {
+            if (root.removable) {
+                root.remove();
+            } else {
+                root.more(x, y);
+            }
+        }
+    }
+}

@@ -8,6 +8,7 @@
 //   IconButton       square or round, optional toggled state
 //   Card             a raised surface (menus, dialogs, overlays)
 //   SectionHeader    a section title with an optional action link
+//   TipArea, Tip     a TouchArea with a tooltip, and the one tooltip the window shows
 //
 // Feedback timing is one value (Tokens.duration-fast, ease-out) for all of them.
 // Keyboard focus is opt-in (`focusable`), so adopting a component never changes how a screen
@@ -252,6 +253,73 @@ export component SectionHeader inherits HorizontalLayout {
                 mouse-cursor: MouseCursor.pointer;
                 clicked => { root.action-clicked(); }
             }
+        }
+    }
+}
+
+// The window's one tooltip. A `TipArea` fills it in; `TipOverlay` (in the main window) shows it.
+export global Tip {
+    in-out property <string> text;
+    in-out property <length> x;
+    in-out property <length> y;
+    in-out property <bool> shown;
+}
+
+// A TouchArea that shows `tip` after the pointer rests on it. Its timer runs only while hovered.
+export component TipArea inherits TouchArea {
+    in property <string> tip;
+    property <bool> armed;
+    public function hide-tip() {
+        root.armed = true;
+        if (Tip.text == root.tip) {
+            Tip.shown = false;
+        }
+    }
+    changed has-hover => {
+        if (!self.has-hover) {
+            root.armed = false;
+            if (Tip.text == root.tip) {
+                Tip.shown = false;
+            }
+        }
+    }
+    changed tip => {
+        if (Tip.shown && self.has-hover) {
+            Tip.text = root.tip;
+        }
+    }
+    Timer {
+        interval: Tokens.tooltip-delay;
+        running: root.has-hover && !root.armed && root.tip != "" && root.enabled;
+        triggered => {
+            root.armed = true;
+            Tip.text = root.tip;
+            Tip.x = root.absolute-position.x + root.mouse-x;
+            Tip.y = root.absolute-position.y + root.height + Tokens.space-xs;
+            Tip.shown = true;
+        }
+    }
+}
+
+// Draws the tooltip; place it last in the window so it is on top. Takes no input.
+export component TipOverlay inherits Rectangle {
+    if Tip.shown && Tip.text != "" : Rectangle {
+        x: max(Tokens.space-sm, min(Tip.x, root.width - self.width - Tokens.space-sm));
+        y: min(Tip.y, root.height - self.height - Tokens.space-sm);
+        width: label.preferred-width + 2 * Tokens.space-sm;
+        height: label.preferred-height + Tokens.space-sm;
+        border-radius: Tokens.radius-sm;
+        background: Tokens.bg-elevated;
+        border-width: Tokens.hairline;
+        border-color: Tokens.border-strong;
+        drop-shadow-blur: Tokens.space-md;
+        drop-shadow-color: Tokens.shadow;
+        label := Caption {
+            x: Tokens.space-sm;
+            height: parent.height;
+            vertical-alignment: center;
+            text: Tip.text;
+            color: Tokens.text-primary;
         }
     }
 }

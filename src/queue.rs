@@ -86,8 +86,49 @@ fn row(uri: &str, uid: &str, queued: bool, play_next: bool, m: Option<&ItemMeta>
         queued,
         play_next,
         unavailable,
+        explicit: m.is_some_and(|m| m.explicit),
+        art: slint::Image::default(),
+        fresh: false,
     }
 }
+
+/// Logical size of a queue row's cover (TrackRow's list variant).
+const ROW_ART: f32 = 48.0;
+
+/// Covers for the rows of `model`: from memory at once, the rest loaded and set as they arrive.
+/// The queue shows at most `SHOW_NEXT` + 10 rows, so this is bounded.
+fn load_art(model: &Rc<VecModel<QueueRow>>, metas: Vec<Option<ItemMeta>>, scale: f32) {
+    use slint::Model;
+    let px = crate::art::physical(ROW_ART, scale);
+    for (i, m) in metas.into_iter().enumerate() {
+        let Some(url) = m.and_then(|m| crate::art::pick_url(&m.images, ROW_ART, scale)) else { continue };
+        if let Some(a) = crate::art::cached(&url, px) {
+            if let Some(mut row) = model.row_data(i) {
+                row.art = slint::Image::from_rgb8(a.buf);
+                model.set_row_data(i, row);
+            }
+            continue;
+        }
+        let weak = SendWeak(Rc::downgrade(model));
+        let uri = model.row_data(i).map(|r| r.uri.to_string()).unwrap_or_default();
+        crate::runtime().spawn(async move {
+            let Some((a, fresh)) = crate::art::load_fresh(&url, px).await else { return };
+            let _ = slint::invoke_from_event_loop(move || {
+                let weak = weak;
+                let Some(model) = weak.0.upgrade() else { return };
+                if let Some(mut row) = model.row_data(i).filter(|r| r.uri.as_str() == uri) {
+                    row.art = slint::Image::from_rgb8(a.buf);
+                    row.fresh = fresh;
+                    model.set_row_data(i, row);
+                }
+            });
+        });
+    }
+}
+
+/// `invoke_from_event_loop` needs `Send`; the weak model is only touched back on the UI thread.
+struct SendWeak<T>(std::rc::Weak<T>);
+unsafe impl<T> Send for SendWeak<T> {}
 
 /// Reloads the panel from librespot's queue. Cheap when the panel is closed (no metadata).
 pub fn refresh(ui: Weak<MainWindow>, rt: &tokio::runtime::Handle) {
@@ -129,10 +170,15 @@ pub fn refresh(ui: Weak<MainWindow>, rt: &tokio::runtime::Handle) {
                 return;
             }
             let q = ui.global::<Queue>();
+            let scale = ui.window().scale_factor();
             let rows: Vec<QueueRow> = next.iter().map(|(u, id, qd, pn, m)| row(u, id, *qd, *pn, m.as_ref())).collect();
-            q.set_next(Rc::new(VecModel::from(rows)).into());
+            let model = Rc::new(VecModel::from(rows));
+            load_art(&model, next.iter().map(|n| n.4.clone()).collect(), scale);
+            q.set_next(model.into());
             let rec: Vec<QueueRow> = recent.iter().map(|(u, m)| row(u, "", false, false, m.as_ref())).collect();
-            q.set_recent(Rc::new(VecModel::from(rec)).into());
+            let model = Rc::new(VecModel::from(rec));
+            load_art(&model, recent.into_iter().map(|r| r.1).collect(), scale);
+            q.set_recent(model.into());
             q.set_queued_count(queued_count);
             q.set_context_name(context_name.into());
             let n = next.len() + more;

@@ -8,7 +8,7 @@
 use crate::api::{self, CardData, Source, TrackData, arr, n, s};
 use crate::art::{self, Priority, SpImage};
 use crate::db;
-use crate::{Browse, Card, MainWindow, Playback, ShelfData, SideItem, StatRow, TrackRow};
+use crate::{Browse, Card, MainWindow, Playback, ShelfData, SideItem, StatRow, Song};
 use reqwest::Method;
 use serde_json::{Value, json};
 use slint::{ComponentHandle, Image, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel, Weak};
@@ -85,23 +85,71 @@ pub fn my_id() -> Option<String> {
 // ---------------------------------------------------------------------------------------------
 // Models (UI thread).
 
-/// A card list for virtualized views (library rows, card grids). Art is requested when a row is
-/// first shown, a couple of screens ahead of the scroll position at lower priority, and dropped
-/// again for rows far from the viewport, so memory follows what is on screen, not the list length.
-struct LazyCards {
-    /// The card, the art URL chosen for its slot, and whether its art was already asked for.
-    rows: RefCell<Vec<(Card, String, Cell<bool>)>>,
+/// A row that shows art: cards and songs.
+trait ArtRow: Clone + PartialEq + 'static {
+    fn key(&self) -> &str;
+    fn art(&self) -> &Image;
+    fn set_art(&mut self, img: Image, fresh: bool);
+}
+
+impl ArtRow for Card {
+    fn key(&self) -> &str {
+        self.uri.as_str()
+    }
+    fn art(&self) -> &Image {
+        &self.art
+    }
+    fn set_art(&mut self, img: Image, fresh: bool) {
+        self.art = img;
+        self.fresh = fresh;
+    }
+}
+
+impl ArtRow for Song {
+    fn key(&self) -> &str {
+        self.uri.as_str()
+    }
+    fn art(&self) -> &Image {
+        &self.art
+    }
+    fn set_art(&mut self, img: Image, fresh: bool) {
+        self.art = img;
+        self.fresh = fresh;
+    }
+}
+
+/// One row of a `LazyArt` list: the row, the art URL chosen for its slot, and whether its art
+/// was already asked for.
+struct Slot<T> {
+    row: T,
+    url: String,
+    asked: Cell<bool>,
+}
+
+/// A list for virtualized views (library rows, card grids, song tables). Art is requested when a
+/// row is first shown, a couple of screens ahead of the scroll position at lower priority, and
+/// dropped again for rows far from the viewport, so memory follows what is on screen, not the
+/// list length. Reading rows from Rust (`peek`, `update_all`) never requests art.
+struct LazyArt<T: ArtRow> {
+    rows: RefCell<Vec<Slot<T>>>,
     notify: ModelNotify,
     /// The slot width in logical pixels.
     px: Cell<f32>,
-    me: std::rc::Weak<LazyCards>,
+    me: std::rc::Weak<LazyArt<T>>,
     /// First row of the window last handled by `window` (scroll events repeat a lot).
     seen_first: Cell<usize>,
 }
 
-impl LazyCards {
-    fn new(px: f32) -> Rc<LazyCards> {
-        Rc::new_cyclic(|me| LazyCards {
+type LazyCards = LazyArt<Card>;
+type LazySongs = LazyArt<Song>;
+
+fn slot<T>((row, url): (T, String)) -> Slot<T> {
+    Slot { row, url, asked: Cell::new(false) }
+}
+
+impl<T: ArtRow> LazyArt<T> {
+    fn new(px: f32) -> Rc<LazyArt<T>> {
+        Rc::new_cyclic(|me| LazyArt {
             rows: RefCell::new(Vec::new()),
             notify: ModelNotify::default(),
             px: Cell::new(px),
@@ -110,8 +158,8 @@ impl LazyCards {
         })
     }
 
-    fn set(&self, rows: Vec<(Card, String)>) {
-        *self.rows.borrow_mut() = rows.into_iter().map(|(c, u)| (c, u, Cell::new(false))).collect();
+    fn set(&self, rows: Vec<(T, String)>) {
+        *self.rows.borrow_mut() = rows.into_iter().map(slot).collect();
         self.seen_first.set(usize::MAX);
         self.notify.reset();
     }
@@ -120,20 +168,94 @@ impl LazyCards {
         self.rows.borrow().len()
     }
 
-    fn extend(&self, rows: impl IntoIterator<Item = (Card, String)>) {
+    fn extend(&self, rows: impl IntoIterator<Item = (T, String)>) {
         let start = self.len();
-        self.rows.borrow_mut().extend(rows.into_iter().map(|(c, u)| (c, u, Cell::new(false))));
+        self.rows.borrow_mut().extend(rows.into_iter().map(slot));
         let added = self.len() - start;
         if added > 0 {
             self.notify.row_added(start, added);
         }
     }
 
-    fn set_art(&self, i: usize, uri: &str, img: Image, fresh: bool) {
+    /// Row `i` without requesting its art.
+    fn peek(&self, i: usize) -> Option<T> {
+        self.rows.borrow().get(i).map(|s| s.row.clone())
+    }
+
+    /// Every row, without requesting art.
+    fn rows(&self) -> Vec<T> {
+        self.rows.borrow().iter().map(|s| s.row.clone()).collect()
+    }
+
+    /// Changes rows in place; views hear about the rows `f` reports as changed.
+    fn update_all(&self, mut f: impl FnMut(&mut T) -> bool) {
+        let changed: Vec<usize> = self.rows.borrow_mut().iter_mut().enumerate().filter_map(|(i, s)| f(&mut s.row).then_some(i)).collect();
+        for i in changed {
+            self.notify.row_changed(i);
+        }
+    }
+
+    /// Replaces the rows, touching as little as possible: a row with the same key and art URL
+    /// keeps its art, unchanged rows are not reported, a longer list with the same start is
+    /// appended to, and only a real change of shape resets the view. Scroll position survives.
+    fn patch(&self, rows: Vec<(T, String)>) {
+        let mut new: Vec<Slot<T>> = Vec::with_capacity(rows.len());
+        {
+            let old = self.rows.borrow();
+            let mut by_key: HashMap<(&str, &str), &Slot<T>> = HashMap::with_capacity(old.len());
+            for s in old.iter() {
+                by_key.entry((s.row.key(), s.url.as_str())).or_insert(s);
+            }
+            for (mut row, url) in rows {
+                let asked = match by_key.get(&(row.key(), url.as_str())) {
+                    Some(prev) if prev.asked.get() => {
+                        let (img, fresh) = (prev.row.art().clone(), false);
+                        row.set_art(img, fresh);
+                        true
+                    }
+                    _ => false,
+                };
+                new.push(Slot { row, url, asked: Cell::new(asked) });
+            }
+        }
+        let old_len = self.len();
+        let same_start = {
+            let old = self.rows.borrow();
+            old.iter().zip(&new).all(|(a, b)| a.row == b.row)
+        };
+        if new.len() >= old_len && same_start {
+            let tail: Vec<Slot<T>> = new.into_iter().skip(old_len).collect();
+            let added = tail.len();
+            self.rows.borrow_mut().extend(tail);
+            if added > 0 {
+                self.notify.row_added(old_len, added);
+            }
+        } else if new.len() == old_len {
+            let changed: Vec<usize> = {
+                let mut old = self.rows.borrow_mut();
+                let mut changed = Vec::new();
+                for (i, (o, n)) in old.iter_mut().zip(new).enumerate() {
+                    if o.row != n.row || o.url != n.url {
+                        *o = n;
+                        changed.push(i);
+                    }
+                }
+                changed
+            };
+            for i in changed {
+                self.notify.row_changed(i);
+            }
+        } else {
+            *self.rows.borrow_mut() = new;
+            self.seen_first.set(usize::MAX);
+            self.notify.reset();
+        }
+    }
+
+    fn set_art(&self, i: usize, key: &str, img: Image, fresh: bool) {
         let hit = match self.rows.borrow_mut().get_mut(i) {
-            Some(r) if r.0.uri.as_str() == uri => {
-                r.0.art = img;
-                r.0.fresh = fresh;
+            Some(s) if s.row.key() == key => {
+                s.row.set_art(img, fresh);
                 true
             }
             _ => false,
@@ -144,11 +266,11 @@ impl LazyCards {
     }
 
     /// The request for row `i` was dropped: let the row ask again when it is next shown.
-    fn forget(&self, i: usize, uri: &str) {
-        if let Some(r) = self.rows.borrow().get(i)
-            && r.0.uri.as_str() == uri
+    fn forget(&self, i: usize, key: &str) {
+        if let Some(s) = self.rows.borrow().get(i)
+            && s.row.key() == key
         {
-            r.2.set(false);
+            s.asked.set(false);
         }
     }
 
@@ -156,18 +278,17 @@ impl LazyCards {
     /// row right here, so a cached row never shows the placeholder.
     fn want(&self, i: usize, priority: Priority) {
         let px = art::physical(self.px.get(), scale());
-        let (uri, url) = {
+        let (key, url) = {
             let rows = self.rows.borrow();
-            let Some(r) = rows.get(i) else { return };
-            if r.2.replace(true) || r.1.is_empty() {
+            let Some(s) = rows.get(i) else { return };
+            if s.asked.replace(true) || s.url.is_empty() {
                 return;
             }
-            (r.0.uri.to_string(), r.1.clone())
+            (s.row.key().to_string(), s.url.clone())
         };
         if let Some(a) = art::cached(&url, px) {
-            if let Some(r) = self.rows.borrow_mut().get_mut(i) {
-                r.0.art = Image::from_rgb8(a.buf);
-                r.0.fresh = false;
+            if let Some(s) = self.rows.borrow_mut().get_mut(i) {
+                s.row.set_art(Image::from_rgb8(a.buf), false);
             }
             if priority == Priority::Prefetch {
                 self.notify.row_changed(i);
@@ -183,8 +304,8 @@ impl LazyCards {
                     return;
                 }
                 match got {
-                    Some((a, fresh)) => model.set_art(i, &uri, Image::from_rgb8(a.buf), fresh),
-                    None => model.forget(i, &uri),
+                    Some((a, fresh)) => model.set_art(i, &key, Image::from_rgb8(a.buf), fresh),
+                    None => model.forget(i, &key),
                 }
             });
         });
@@ -202,23 +323,31 @@ impl LazyCards {
         }
         let keep = first.saturating_sub(2 * screen)..(last + 3 * screen).min(len);
         let mut rows = self.rows.borrow_mut();
-        for (i, r) in rows.iter_mut().enumerate() {
-            if !keep.contains(&i) && r.2.get() {
-                r.0.art = Image::default();
-                r.2.set(false);
+        for (i, s) in rows.iter_mut().enumerate() {
+            if !keep.contains(&i) && s.asked.get() {
+                s.row.set_art(Image::default(), false);
+                s.asked.set(false);
             }
         }
     }
 }
 
-impl Model for LazyCards {
-    type Data = Card;
+impl<T: ArtRow> Model for LazyArt<T> {
+    type Data = T;
     fn row_count(&self) -> usize {
         self.rows.borrow().len()
     }
-    fn row_data(&self, i: usize) -> Option<Card> {
+    fn row_data(&self, i: usize) -> Option<T> {
         self.want(i, Priority::Visible);
-        self.rows.borrow().get(i).map(|r| r.0.clone())
+        self.rows.borrow().get(i).map(|s| s.row.clone())
+    }
+    fn set_row_data(&self, i: usize, data: T) {
+        if let Some(s) = self.rows.borrow_mut().get_mut(i) {
+            s.row = data;
+        } else {
+            return;
+        }
+        self.notify.row_changed(i);
     }
     fn model_tracker(&self) -> &dyn ModelTracker {
         &self.notify
@@ -231,18 +360,18 @@ impl Model for LazyCards {
 struct Models {
     shelves: Rc<VecModel<ShelfData>>,
     shelf_cards: RefCell<Vec<Rc<VecModel<Card>>>>,
-    found_tracks: Rc<VecModel<TrackRow>>,
+    found_tracks: Rc<VecModel<Song>>,
     found_shelves: Rc<VecModel<ShelfData>>,
     found_cards: RefCell<Vec<Rc<VecModel<Card>>>>,
-    tracks: Rc<VecModel<TrackRow>>,
+    tracks: Rc<LazySongs>,
     list_cards: Rc<LazyCards>,
     lib: Rc<LazyCards>,
     /// The art URL each home / search shelf card was loaded from (to tell a changed cover).
     card_urls: RefCell<HashMap<String, String>>,
     side: Rc<VecModel<SideItem>>,
-    popular: Rc<VecModel<TrackRow>>,
+    popular: Rc<LazySongs>,
     disc: Rc<VecModel<Card>>,
-    find_tracks: Rc<VecModel<TrackRow>>,
+    find_tracks: Rc<LazySongs>,
     find_cards: Rc<VecModel<Card>>,
     history: Rc<VecModel<SharedString>>,
 }
@@ -326,8 +455,8 @@ fn card(c: &CardData) -> Card {
     }
 }
 
-fn row(t: &TrackData, index: usize) -> TrackRow {
-    TrackRow {
+fn row(t: &TrackData, index: usize) -> Song {
+    Song {
         title: t.title.as_str().into(),
         artist: t.artist.as_str().into(),
         album: t.album.as_str().into(),
@@ -343,7 +472,29 @@ fn row(t: &TrackData, index: usize) -> TrackRow {
         marked: false,
         progress: 0.0,
         note: t.note.as_str().into(),
+        art: Image::default(),
+        fresh: false,
     }
+}
+
+/// Cover sizes of the song rows, in logical pixels (ui/track_row.slint).
+const TABLE_ART: f32 = 40.0;
+const LIST_ART: f32 = 48.0;
+
+/// The art URL for a song row whose cover is `logical` pixels wide.
+fn song_art(t: &TrackData, logical: f32) -> String {
+    art::pick_url(&t.images, logical, scale()).unwrap_or_default()
+}
+
+/// A song row with its art URL, for a `LazySongs` list.
+fn song(t: &TrackData, index: usize, logical: f32) -> (Song, String) {
+    (row(t, index), song_art(t, logical))
+}
+
+/// The two cover sizes the library index keeps for an item (Part 1).
+fn lib_images(l: &db::LibItem) -> Vec<SpImage> {
+    let sized = |url: &str, w: u32| (!url.is_empty()).then(|| SpImage { url: url.to_string(), width: Some(w), height: Some(w) });
+    sized(&l.image, 64).into_iter().chain(sized(&l.image_lg, 300)).collect()
 }
 
 fn image_url(c: &CardData, logical: f32) -> Option<String> {
@@ -473,11 +624,11 @@ fn new_page(ui: &MainWindow, page: &str, status: &str) -> u64 {
     SEARCH.fetch_add(1, Relaxed);
     FIND.fetch_add(1, Relaxed);
     with_models(|m| {
-        m.tracks.set_vec(Vec::new());
+        m.tracks.set(Vec::new());
         m.list_cards.set(Vec::new());
-        m.popular.set_vec(Vec::new());
+        m.popular.set(Vec::new());
         m.disc.set_vec(Vec::new());
-        m.find_tracks.set_vec(Vec::new());
+        m.find_tracks.set(Vec::new());
         m.find_cards.set_vec(Vec::new());
         m.found_tracks.set_vec(Vec::new());
         m.found_shelves.set_vec(Vec::new());
@@ -525,6 +676,7 @@ fn new_page(ui: &MainWindow, page: &str, status: &str) -> u64 {
     b.set_following(false);
     b.set_disc_filter("all".into());
     b.set_has_top(false);
+    b.set_sel_row(-1);
     // Artist and album pages show the Now Playing panel with lyrics (unless the queue is open).
     if page == "artist" {
         ui.global::<Playback>().set_side_open(true);
@@ -1170,7 +1322,7 @@ fn track_as_card(t: &TrackData) -> CardData {
         title: t.title.clone(),
         subtitle: t.artist.clone(),
         uri: t.uri.clone(),
-        art_url: t.image.clone(),
+        images: t.images.clone(),
         kind: "track".into(),
         ..Default::default()
     }
@@ -1247,7 +1399,7 @@ fn load_more_search(g: u64) {
             if kind == "track" || kind == "episode" {
                 let rows: Vec<TrackData> = items.iter().map(if kind == "track" { api::track } else { api::episode }).filter(|t| !t.uri.is_empty()).collect();
                 let start = data(|d| d.rows.len());
-                with_models(|m| m.tracks.extend(rows.iter().enumerate().map(|(i, t)| row(t, start + i))));
+                with_models(|m| m.tracks.extend(rows.iter().enumerate().map(|(i, t)| song(t, start + i, TABLE_ART))));
                 data(|d| d.rows.extend(rows));
                 b.set_list_meta(format!("{} results", data(|d| d.rows.len())).into());
             } else {
@@ -1529,7 +1681,7 @@ fn fetch_list(g: u64, kind: &'static str, uri: String, src: Source) {
                         if d.album.is_empty() {
                             d.album = s(&head["name"]).to_string();
                         }
-                        d.image = api::first_image(&head["images"]);
+                        d.images = api::sizes(api::images(&head["images"]));
                         d
                     }).collect());
                     let next = head["tracks"]["next"].is_string();
@@ -1682,7 +1834,7 @@ fn apply_order(ui: &MainWindow, reset_hearts: bool) {
     let old: HashMap<String, (bool, bool, bool, f32)> = if reset_hearts {
         HashMap::new()
     } else {
-        with_models(|m| (0..m.tracks.row_count()).filter_map(|i| m.tracks.row_data(i)).map(|r| (r.uri.to_string(), (r.liked, r.liked_known, r.marked, r.progress))).collect())
+        with_models(|m| m.tracks.rows().into_iter().map(|r| (r.uri.to_string(), (r.liked, r.liked_known, r.marked, r.progress))).collect())
     };
     let rows = data(|d| {
         let mut order: Vec<usize> = (0..d.rows.len()).filter(|&i| !hide_explicit(&d.rows[i])).collect();
@@ -1702,18 +1854,18 @@ fn apply_order(ui: &MainWindow, reset_hearts: bool) {
         order
             .iter()
             .map(|&i| {
-                let mut r = row(&d.rows[i], i);
+                let (mut r, url) = song(&d.rows[i], i, TABLE_ART);
                 if let Some((l, k, m, p)) = old.get(&d.rows[i].uri) {
                     r.liked = *l;
                     r.liked_known = *k;
                     r.marked = *m;
                     r.progress = *p;
                 }
-                r
+                (r, url)
             })
             .collect::<Vec<_>>()
     });
-    with_models(|m| patch_model(&m.tracks, rows));
+    with_models(|m| m.tracks.patch(rows));
 }
 
 /// Fetches the next page of the current list. `auto` keeps going until done (playlists and
@@ -1785,8 +1937,8 @@ fn load_more(g: u64, auto: bool) {
                 "show" => {
                     let rows: Vec<TrackData> = items.iter().map(api::episode).collect();
                     let start = data(|d| d.rows.len());
-                    let shown: Vec<TrackRow> = rows.iter().enumerate().map(|(i, t)| {
-                        let mut r = row(t, start + i);
+                    let shown: Vec<(Song, String)> = rows.iter().enumerate().map(|(i, t)| {
+                        let (mut r, url) = song(t, start + i, TABLE_ART);
                         // Local progress wins over Spotify's resume point.
                         let api_pos = n(&items[i]["resume_point"]["resume_position_ms"]);
                         let api_done = items[i]["resume_point"]["fully_played"].as_bool().unwrap_or(false);
@@ -1794,7 +1946,7 @@ fn load_more(g: u64, auto: bool) {
                         r.marked = played;
                         r.progress = if played { 1.0 } else if t.duration_ms > 0 { pos as f32 / t.duration_ms as f32 } else { 0.0 };
                         r.added = if played { "Played".into() } else if pos > 0 { format!("{} left", api::long_duration(t.duration_ms.saturating_sub(pos as u64))).into() } else { "".into() };
-                        r
+                        (r, url)
                     }).collect();
                     with_models(|m| m.tracks.extend(shown));
                     data(|d| d.rows.extend(rows));
@@ -1855,15 +2007,14 @@ fn load_hearts(g: u64) {
 
 fn set_hearts(map: &HashMap<String, bool>) {
     for model in with_models(|m| [m.tracks.clone(), m.popular.clone()]) {
-        for i in 0..model.row_count() {
-            if let Some(mut r) = model.row_data(i)
-                && let Some(l) = map.get(r.uri.as_str())
-            {
-                r.liked = *l;
+        model.update_all(|r| match map.get(r.uri.as_str()) {
+            Some(&l) if !(r.liked == l && r.liked_known) => {
+                r.liked = l;
                 r.liked_known = true;
-                model.set_row_data(i, r);
+                true
             }
-        }
+            _ => false,
+        });
     }
 }
 
@@ -1878,6 +2029,7 @@ fn open_liked(ui: &MainWindow, g: u64) {
         let rows: Vec<TrackData> = db::library_list("track", "", "recent", 20_000)
             .into_iter()
             .map(|l| TrackData {
+                images: lib_images(&l),
                 title: l.title,
                 artist: l.artist,
                 artist_uri: l.artist_uri,
@@ -1886,7 +2038,6 @@ fn open_liked(ui: &MainWindow, g: u64) {
                 added: l.added_at.get(..10).unwrap_or("").to_string(),
                 duration_ms: l.duration_ms as u64,
                 explicit: l.explicit,
-                image: l.image,
                 uri: l.uri,
                 ..Default::default()
             })
@@ -2021,7 +2172,7 @@ fn open_artist_liked(ui: &MainWindow, artist_uri: &str) {
     finish(&b);
     let rows: Vec<TrackData> = liked
         .into_iter()
-        .map(|l| TrackData { title: l.title, artist: l.artist, album: l.album, duration_ms: l.duration_ms as u64, explicit: l.explicit, uri: l.uri, ..Default::default() })
+        .map(|l| TrackData { images: lib_images(&l), title: l.title, artist: l.artist, album: l.album, duration_ms: l.duration_ms as u64, explicit: l.explicit, uri: l.uri, ..Default::default() })
         .collect();
     b.set_list_meta(format!("{} songs", rows.len()).into());
     append_tracks(ui, rows);
@@ -2086,8 +2237,8 @@ fn open_artist(ui: &MainWindow, uri: &str) {
             let (rows, title, note) = popular;
             b.set_popular_title(title.into());
             b.set_popular_note(note.into());
-            let shown: Vec<TrackRow> = rows.iter().filter(|t| !hide_explicit(t)).enumerate().map(|(i, t)| row(t, i)).collect();
-            with_models(|m| m.popular.set_vec(shown));
+            let shown: Vec<(Song, String)> = rows.iter().filter(|t| !hide_explicit(t)).enumerate().map(|(i, t)| song(t, i, LIST_ART)).collect();
+            with_models(|m| m.popular.set(shown));
             let uris: Vec<String> = rows.iter().map(|r| r.uri.clone()).filter(|u| u.starts_with("spotify:track:")).collect();
             data(|d| d.popular = rows);
             if crate::web().is_some() && !uris.is_empty() {
@@ -2129,7 +2280,7 @@ async fn popular_tracks(artist_uri: &str) -> (Vec<TrackData>, String, String) {
                     duration_ms: m.duration_ms as u64,
                     explicit: m.explicit,
                     uri: u.clone(),
-                    image: m.art_url.unwrap_or_default(),
+                    images: m.images,
                     ..Default::default()
                 });
             }
@@ -2149,7 +2300,7 @@ async fn popular_tracks(artist_uri: &str) -> (Vec<TrackData>, String, String) {
             break;
         }
         if !rows.iter().any(|r| r.uri == l.uri) {
-            rows.push(TrackData { title: l.title, artist: l.artist, album: l.album, duration_ms: l.duration_ms as u64, explicit: l.explicit, uri: l.uri, ..Default::default() });
+            rows.push(TrackData { images: lib_images(&l), title: l.title, artist: l.artist, album: l.album, duration_ms: l.duration_ms as u64, explicit: l.explicit, uri: l.uri, ..Default::default() });
         }
     }
     let note = if rows.is_empty() {
@@ -2231,6 +2382,35 @@ fn load_profile_pic() -> Image {
 
 fn visible_uris() -> Vec<String> {
     data(|d| d.order.iter().map(|&i| d.rows[i].uri.clone()).collect())
+}
+
+/// What a row's play button does.
+#[derive(Debug, PartialEq, Eq)]
+enum RowAction {
+    /// The row is the current track: pause or resume it.
+    Toggle,
+    /// Another track: start it from this row, in the list's context.
+    Start,
+}
+
+fn row_action(is_current: bool) -> RowAction {
+    if is_current { RowAction::Toggle } else { RowAction::Start }
+}
+
+/// A row's play button. The current track (playing or paused, including a restored session)
+/// toggles; any other row starts playing exactly like a double-click.
+fn row_toggle(ui: &MainWindow, context: &str, i: usize, uri: &str) {
+    let current = !uri.is_empty() && ui.global::<Browse>().get_current_uri() == uri;
+    match row_action(current) {
+        RowAction::Toggle => crate::play_pause_cmd(),
+        RowAction::Start if context == uri => {
+            // A row without a list context (Add songs finder): that one track.
+            crate::queue::forget_restore();
+            ui.global::<Playback>().set_context_uri("".into());
+            crate::with_player(|p| p.play(uri, 0));
+        }
+        RowAction::Start => play_row(ui, context, i),
+    }
 }
 
 /// Double-click on row `i` of the current page (display order) or a header Play.
@@ -2453,7 +2633,7 @@ fn toggle_follow(ui: &MainWindow) {
 fn track_heart(ui: &MainWindow, i: i32) {
     let model = if i < 0 { with_models(|m| m.popular.clone()) } else { with_models(|m| m.tracks.clone()) };
     let idx = if i < 0 { (-1 - i) as usize } else { i as usize };
-    let Some(mut r) = model.row_data(idx) else { return };
+    let Some(mut r) = model.peek(idx) else { return };
     if !r.liked_known {
         return;
     }
@@ -2496,7 +2676,7 @@ fn find(ui: &MainWindow, text: &str) {
     b.set_find_expanded("".into());
     if q.is_empty() {
         with_models(|m| {
-            m.find_tracks.set_vec(Vec::new());
+            m.find_tracks.set(Vec::new());
             m.find_cards.set_vec(Vec::new());
         });
         b.set_find_note("".into());
@@ -2531,17 +2711,17 @@ fn find(ui: &MainWindow, text: &str) {
 
 fn set_find(tracks: &[TrackData], cards: &[CardData]) {
     let have: HashSet<String> = data(|d| d.rows.iter().map(|r| r.uri.clone()).collect());
-    let rows: Vec<TrackRow> = tracks
+    let rows: Vec<(Song, String)> = tracks
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let mut r = row(t, i);
+            let (mut r, url) = song(t, i, LIST_ART);
             r.marked = have.contains(&t.uri);
-            r
+            (r, url)
         })
         .collect();
     with_models(|m| {
-        m.find_tracks.set_vec(rows);
+        m.find_tracks.set(rows);
         m.find_cards.set_vec(cards.iter().map(card).collect::<Vec<_>>());
     });
     data(|d| {
@@ -2614,7 +2794,7 @@ fn add_to_current(ui: &MainWindow, playlist: &str, uri: &str) {
             Ok(_) => {
                 crate::menu::toast_text(&ui, "Added to this playlist");
                 if ui.global::<Browse>().get_list_uri() == playlist.as_str() {
-                    let t = meta.map(|m| TrackData { title: m.title, artist: m.artist, album: m.album, duration_ms: m.duration_ms as u64, explicit: m.explicit, uri: uri.clone(), added: "today".into(), ..Default::default() })
+                    let t = meta.map(|m| TrackData { title: m.title, artist: m.artist, album: m.album, duration_ms: m.duration_ms as u64, explicit: m.explicit, images: m.images, uri: uri.clone(), added: "today".into(), ..Default::default() })
                         .unwrap_or(TrackData { uri: uri.clone(), title: uri.clone(), ..Default::default() });
                     append_tracks(&ui, vec![t]);
                     let (tracks, cards) = data(|d| (d.find.clone(), d.find_cards.clone()));
@@ -2658,14 +2838,14 @@ pub fn init(ui: &MainWindow) {
         found_tracks: Rc::new(VecModel::default()),
         found_shelves: Rc::new(VecModel::default()),
         found_cards: RefCell::new(Vec::new()),
-        tracks: Rc::new(VecModel::default()),
+        tracks: LazyArt::new(TABLE_ART),
         list_cards: LazyCards::new(160.0),
         lib: LazyCards::new(56.0),
         card_urls: RefCell::new(HashMap::new()),
         side: Rc::new(VecModel::default()),
-        popular: Rc::new(VecModel::default()),
+        popular: LazyArt::new(LIST_ART),
         disc: Rc::new(VecModel::default()),
-        find_tracks: Rc::new(VecModel::default()),
+        find_tracks: LazyArt::new(LIST_ART),
         find_cards: Rc::new(VecModel::default()),
         history: Rc::new(VecModel::default()),
     };
@@ -2692,6 +2872,12 @@ pub fn init(ui: &MainWindow) {
     b.on_scrolled(move || {
         if let Some(ui) = w.upgrade() {
             on_scrolled(&ui);
+        }
+    });
+    let w = ui.as_weak();
+    b.on_row_toggle(move |context, i, uri| {
+        if let Some(ui) = w.upgrade() {
+            row_toggle(&ui, &context, i.max(0) as usize, &uri);
         }
     });
     b.on_open(|uri| go(&uri));
@@ -2923,6 +3109,11 @@ fn on_scrolled(ui: &MainWindow) {
             let first = (y / row) as usize;
             with_models(|m| m.lib.window(first, first + (h / row).ceil() as usize));
         }
+        "list" if with_models(|m| m.tracks.len()) > 0 => {
+            // Song table rows (Tokens.row-track).
+            let first = (y / 56.0) as usize;
+            with_models(|m| m.tracks.window(first, first + (h / 56.0).ceil() as usize));
+        }
         "list" if with_models(|m| m.list_cards.len()) > 0 => {
             // The card grid: 176 px cells, 220 px rows, 32 px page margins (ui/browse.slint CardGrid).
             let width = ui.window().size().width as f32 / scale() - 232.0;
@@ -2979,6 +3170,12 @@ pub fn reapply_filters() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_button_toggles_only_the_current_track() {
+        assert_eq!(row_action(true), RowAction::Toggle);
+        assert_eq!(row_action(false), RowAction::Start);
+    }
 
     #[test]
     fn patch_model_keeps_what_did_not_change() {

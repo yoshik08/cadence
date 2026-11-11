@@ -348,6 +348,17 @@ impl Player {
                 .min_by_key(|i| (i.width - 300).abs())
                 .map(|i| format!("https://i.scdn.co/image/{}", i.id))
         };
+        let images = |imgs: &[librespot_metadata::image::Image]| {
+            crate::api::sizes(
+                imgs.iter()
+                    .map(|i| crate::art::SpImage {
+                        url: format!("https://i.scdn.co/image/{}", i.id),
+                        width: (i.width > 0).then_some(i.width as u32),
+                        height: (i.height > 0).then_some(i.height as u32),
+                    })
+                    .collect(),
+            )
+        };
         let timeout = Duration::from_secs(8);
         match id {
             SpotifyUri::Track { .. } => {
@@ -360,6 +371,7 @@ impl Player {
                     artist_uri: t.artists.0.first().and_then(|a| a.id.to_uri().ok()).unwrap_or_default(),
                     duration_ms: t.duration.max(0) as u32,
                     art_url: cover(&t.album.covers.0),
+                    images: images(&t.album.covers.0),
                     explicit: t.is_explicit,
                 })
             }
@@ -370,6 +382,7 @@ impl Player {
                     artist: e.show_name.clone(),
                     duration_ms: e.duration.max(0) as u32,
                     art_url: cover(&e.covers.0),
+                    images: images(&e.covers.0),
                     explicit: e.is_explicit,
                     ..Default::default()
                 })
@@ -404,6 +417,8 @@ pub struct ItemMeta {
     pub artist_uri: String,
     pub duration_ms: u32,
     pub art_url: Option<String>,
+    /// Cover sizes for rows (at most three; see `api::sizes`).
+    pub images: Vec<crate::art::SpImage>,
     pub explicit: bool,
 }
 

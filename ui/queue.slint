@@ -5,6 +5,8 @@ import { Cover } from "cover.slint";
 import { ScrollView } from "std-widgets.slint";
 import { Playback, Icons } from "now_playing.slint";
 import { Label, Caption, ListRow, IconButton, SectionHeader } from "base.slint";
+import { TrackRow, SongColumns } from "track_row.slint";
+import { Browse } from "browse.slint";
 
 export struct QueueRow {
     title: string,
@@ -16,6 +18,9 @@ export struct QueueRow {
     queued: bool,
     play-next: bool,
     unavailable: bool,
+    explicit: bool,
+    art: image,
+    fresh: bool,
 }
 
 export global Queue {
@@ -41,11 +46,13 @@ component Heading inherits Caption {
     vertical-alignment: center;
 }
 
+// One queue row: the shared TrackRow (list variant) with the queue's drag handle in front of
+// the cover and a remove button for queued items.
 component Row inherits Rectangle {
     in property <QueueRow> item;
     in property <int> index;
     in property <bool> draggable;
-    in property <length> row-h: Tokens.row-md;
+    in property <length> row-h: Tokens.row-track;
     // Rows of the user queue; a drag is clamped to them.
     in property <int> drag-max;
     property <length> press-y;
@@ -53,98 +60,80 @@ component Row inherits Rectangle {
     property <length> offset;
     // Pointer travel before a press becomes a drag.
     property <length> drag-threshold: 6px;
-    property <length> duration-width: 44px;
-    // Text starts after the drag handle; the duration and remove button sit on the right.
-    property <length> text-x: Tokens.space-xl;
-    property <length> trailing: root.duration-width + Tokens.space-sm + Tokens.control-sm;
+    // Room for the drag handle before the cover.
+    property <length> handle: Tokens.space-lg;
     height: root.row-h;
     z: root.dragging ? 10 : 0;
 
-    ListRow {
+    row := TrackRow {
         y: root.offset;
-        hovered: ta.has-hover;
-        pressed: ta.pressed && !root.dragging;
-        selected: root.dragging;
-        drop-shadow-blur: root.dragging ? Tokens.shadow-blur : 0px;
-        drop-shadow-color: Tokens.shadow;
-
-        if root.draggable : Path {
-            x: Tokens.space-xs;
-            y: (parent.height - self.height) / 2;
-            width: Tokens.icon-xs;
-            height: Tokens.icon-xs;
-            viewbox-width: 12;
-            viewbox-height: 12;
-            stroke: Tokens.text-tertiary;
-            stroke-width: Tokens.hairline;
-            commands: "M2 3h8 M2 6h8 M2 9h8";
-            opacity: ta.has-hover || root.dragging ? 1 : 0;
-        }
-        VerticalLayout {
-            x: root.text-x;
-            width: parent.width - root.text-x - root.trailing;
-            alignment: center;
-            spacing: Tokens.space-2xs;
-            Label {
-                text: root.item.title;
-                font-weight: Tokens.weight-medium;
-                color: root.item.unavailable ? Tokens.text-tertiary : Tokens.text-primary;
-            }
-            Caption {
-                text: root.item.play-next ? "Playing next · " + root.item.artist : root.item.artist;
+        width: root.width;
+        height: root.height;
+        variant: "list";
+        lead: root.handle;
+        show-heart: false;
+        show-more: !root.item.queued;
+        removable: root.item.queued;
+        lifted: root.dragging;
+        item: {
+            title: root.item.title,
+            artist: root.item.play-next ? "Playing next · " + root.item.artist : root.item.artist,
+            duration: root.item.duration,
+            uri: root.item.uri,
+            explicit: root.item.explicit,
+            unavailable: root.item.unavailable,
+            art: root.item.art,
+            fresh: root.item.fresh,
+        };
+        double-clicked => {
+            if (root.index >= 0) {
+                Queue.play-row(root.index);
+            } else {
+                Browse.play(root.item.uri, 0);
             }
         }
-        Caption {
-            x: parent.width - root.trailing;
-            width: root.duration-width;
-            y: (parent.height - self.height) / 2;
-            text: root.item.duration;
-            color: Tokens.text-tertiary;
-            horizontal-alignment: right;
+        play-pause => {
+            if (root.index >= 0) {
+                Queue.play-row(root.index);
+            } else {
+                Browse.play(root.item.uri, 0);
+            }
         }
-        ta := TouchArea {
-            mouse-cursor: root.dragging ? MouseCursor.grabbing : MouseCursor.default;
-            pointer-event(e) => {
-                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
-                    Queue.row-menu(root.item.uri, root.item.uid, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
-                }
-                if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
-                    root.press-y = self.mouse-y;
-                }
-                if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
-                    if (root.dragging) {
-                        root.dragging = false;
-                        root.offset = 0px;
-                        Queue.move-to(root.item.uid, Math.clamp(root.index + Math.round((self.mouse-y - root.press-y) / root.row-h), 0, root.drag-max - 1));
-                    }
-                }
+        menu(x, y) => { Queue.row-menu(root.item.uri, root.item.uid, x, y); }
+        more(x, y) => { Queue.row-menu(root.item.uri, root.item.uid, x, y); }
+        remove => { Queue.remove(root.item.uid); }
+        pointer(e, y) => {
+            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                root.press-y = y;
             }
-            moved => {
-                if (self.pressed && root.draggable) {
-                    if (abs(self.mouse-y - root.press-y) > root.drag-threshold) {
-                        root.dragging = true;
-                    }
-                    if (root.dragging) {
-                        root.offset = self.mouse-y - root.press-y;
-                    }
-                }
+            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up && root.dragging) {
+                root.dragging = false;
+                root.offset = 0px;
+                Queue.move-to(root.item.uid, Math.clamp(root.index + Math.round((y - root.press-y) / root.row-h), 0, root.drag-max - 1));
             }
-            double-clicked => {
-                if (root.index >= 0) {
-                    Queue.play-row(root.index);
+        }
+        dragged(y, pressed) => {
+            if (pressed && root.draggable) {
+                if (abs(y - root.press-y) > root.drag-threshold) {
+                    root.dragging = true;
+                }
+                if (root.dragging) {
+                    root.offset = y - root.press-y;
                 }
             }
         }
-        // Remove (queued items only).
-        if root.item.queued : IconButton {
-            x: parent.width - self.width - Tokens.space-xs;
-            y: (parent.height - self.height) / 2;
-            size: Tokens.control-sm;
-            icon-size: Tokens.icon-sm;
-            icon: Icons.close;
-            opacity: ta.has-hover || self.has-hover ? 1 : 0;
-            clicked => { Queue.remove(root.item.uid); }
-        }
+    }
+    if root.draggable : Path {
+        x: SongColumns.inset + Tokens.space-2xs;
+        y: root.offset + (root.height - self.height) / 2;
+        width: Tokens.icon-xs;
+        height: Tokens.icon-xs;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        stroke: Tokens.text-tertiary;
+        stroke-width: Tokens.hairline;
+        commands: "M2 3h8 M2 6h8 M2 9h8";
+        opacity: row.hovered || root.dragging ? 1 : 0;
     }
 }
 

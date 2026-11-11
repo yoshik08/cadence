@@ -232,7 +232,7 @@ pub fn is_local_active() -> bool {
 
 /// Play/pause from any source (bar, Space, SMTC, taskbar). The first press after launch resumes
 /// the saved session when nothing is loaded yet.
-fn play_pause_cmd() {
+pub fn play_pause_cmd() {
     PAUSED_BY_BT.store(false, Ordering::Relaxed);
     if !is_local_active() && queue::resume() {
         return;
@@ -989,6 +989,11 @@ static CADENCE_SWEEP_DONE: AtomicBool = AtomicBool::new(false);
 /// CADENCE_SHOTS="ms:file.png,...": snapshots at those offsets, then quit (test builds).
 fn schedule_shots(ui: &MainWindow) {
     schedule_sweep(ui);
+    // CADENCE_TEST_NOW="uri": mark that track as the one playing (row states in snapshots).
+    if let Ok(uri) = std::env::var("CADENCE_TEST_NOW") {
+        ui.global::<Browse>().set_current_uri(uri.into());
+        ui.global::<Playback>().set_playing(true);
+    }
     // CADENCE_MINI_SHOT="ms:file.png": open the mini player and snapshot it (test builds).
     if let Ok(spec) = std::env::var("CADENCE_MINI_SHOT")
         && let Some((ms, file)) = spec.split_once(':')

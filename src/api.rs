@@ -173,8 +173,24 @@ pub fn images(j: &Value) -> Vec<SpImage> {
         .collect()
 }
 
-pub fn first_image(j: &Value) -> String {
-    images(j).first().map(|i| i.url.clone()).unwrap_or_default()
+/// At most three of `list`: the ones closest to 64, 300 and 640 px. Spotify usually sends exactly
+/// those; this keeps a row's memory small whatever it sends. Images without a size (uploaded
+/// playlist covers) keep only the first.
+pub fn sizes(list: Vec<SpImage>) -> Vec<SpImage> {
+    let sized: Vec<&SpImage> = list.iter().filter(|i| i.width.or(i.height).is_some()).collect();
+    if sized.is_empty() {
+        return list.into_iter().take(1).collect();
+    }
+    let width = |i: &SpImage| i.width.or(i.height).unwrap_or(0) as i64;
+    let mut out: Vec<SpImage> = Vec::new();
+    for target in [64i64, 300, 640] {
+        if let Some(best) = sized.iter().min_by_key(|i| (width(i) - target).abs())
+            && !out.iter().any(|o| o.url == best.url)
+        {
+            out.push((*best).clone());
+        }
+    }
+    out
 }
 
 pub fn mmss(ms: u64) -> String {
@@ -257,7 +273,8 @@ pub struct TrackData {
     pub local: bool,
     /// Episodes: description line; tracks: unused.
     pub note: String,
-    pub image: String,
+    /// Cover sizes (at most three, see `sizes`); rows pick theirs with `art::pick_image`.
+    pub images: Vec<SpImage>,
 }
 
 pub fn track(t: &Value) -> TrackData {
@@ -280,7 +297,7 @@ pub fn track(t: &Value) -> TrackData {
         local: t["is_local"].as_bool().unwrap_or(false) || uri.starts_with("spotify:local:"),
         explicit: t["explicit"].as_bool().unwrap_or(false),
         unavailable: t["is_playable"].as_bool() == Some(false),
-        image: first_image(&t["album"]["images"]),
+        images: sizes(images(&t["album"]["images"])),
         note: String::new(),
         uri,
     }
@@ -291,7 +308,7 @@ pub fn episode(e: &Value) -> TrackData {
     t.album = s(&e["release_date"]).to_string();
     t.artist = s(&e["show"]["name"]).to_string();
     t.note = plain(s(&e["description"])).chars().take(160).collect();
-    t.image = first_image(&e["images"]);
+    t.images = sizes(images(&e["images"]));
     t
 }
 
@@ -421,6 +438,16 @@ mod tests {
         assert_eq!(parse_link("spotify:playlist:p1").as_deref(), Some("spotify:playlist:p1"));
         assert_eq!(parse_link("hello"), None);
         assert_eq!(parse_link("spotify:user:x"), None);
+    }
+
+    #[test]
+    fn keeps_three_sizes() {
+        let img = |w: u32| SpImage { url: format!("u{w}"), width: Some(w), height: Some(w) };
+        let kept: Vec<String> = sizes(vec![img(1000), img(640), img(300), img(160), img(64), img(32)]).into_iter().map(|i| i.url).collect();
+        assert_eq!(kept, ["u64", "u300", "u640"]);
+        assert_eq!(sizes(vec![img(640), img(64)]).len(), 2);
+        let no_size = SpImage { url: "a".into(), ..Default::default() };
+        assert_eq!(sizes(vec![no_size.clone(), SpImage { url: "b".into(), ..Default::default() }]), vec![no_size]);
     }
 
     #[test]

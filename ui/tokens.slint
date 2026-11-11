@@ -60,6 +60,8 @@ export global Tokens {
     // Behind art that has never loaded. Cached art never shows it.
     out property <color> art-placeholder: Primitive.ink-3;
     out property <color> scrim: Primitive.black-63;
+    // Dims a cover under its play button.
+    out property <color> art-scrim: Primitive.black-50;
     out property <color> shadow: Primitive.black-50;
     out property <color> shadow-strong: Primitive.black-72;
 
@@ -132,6 +134,8 @@ export global Tokens {
     out property <duration> duration-fast: 120ms;
     out property <duration> duration-base: 200ms;
     out property <duration> duration-slow: 320ms;
+    // How long the pointer rests on something before its tooltip shows.
+    out property <duration> tooltip-delay: 500ms;
     // ease-out for hover / enter, ease-in-out for things that move.
     out property <easing> ease-out: cubic-bezier(0.22, 1, 0.36, 1);
     out property <easing> ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
@@ -152,6 +156,8 @@ export global Tokens {
     out property <length> row-sm: 36px;
     out property <length> row-md: 52px;
     out property <length> row-lg: 68px;
+    // Song rows (cover, title over artist).
+    out property <length> row-track: 56px;
     // Art: row thumbnail, card, page header.
     out property <length> art-thumb: 56px;
     out property <length> art-card: 160px;
