@@ -135,9 +135,13 @@ export component SettingsPage inherits PageFade {
                     Chip { y: (parent.height - self.height) / 2; text: "Normal"; selected: Settings.loudness == "normal"; clicked => { Settings.loudness = "normal"; Settings.changed("loudness"); } }
                     Chip { y: (parent.height - self.height) / 2; text: "Loud"; selected: Settings.loudness == "loud"; clicked => { Settings.loudness = "loud"; Settings.changed("loudness"); } }
                 }
-                Switch { label: "Gapless playback"; key: "gapless"; on <=> Settings.gapless; }
-                Switch { label: "Autoplay"; hint: "Keep playing similar music when your music ends."; key: "autoplay"; on <=> Settings.autoplay; }
                 Switch { label: "Mono audio"; hint: "Left and right play the same."; key: "mono"; on <=> Settings.mono; }
+            }
+
+            Group {
+                title: "Playback";
+                Switch { label: "Gapless playback"; key: "gapless"; on <=> Settings.gapless; }
+                Switch { label: "Autoplay"; hint: "Enjoy nonstop listening. When your audio ends, we'll play you something similar.\nApplies after restart."; key: "autoplay"; on <=> Settings.autoplay; }
                 Row {
                     label: "Filter explicit content";
                     hint: "Hides explicit tracks in lists and skips them during playback (uses each track's explicit flag).";
