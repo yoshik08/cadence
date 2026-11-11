@@ -24,6 +24,7 @@ mod player;
 mod podcast;
 mod prefs;
 mod queue;
+mod rank;
 mod settings;
 mod sleep;
 mod smtc;
@@ -1046,6 +1047,14 @@ static CADENCE_SWEEP_DONE: AtomicBool = AtomicBool::new(false);
 /// CADENCE_SHOTS="ms:file.png,...": snapshots at those offsets, then quit (test builds).
 fn schedule_shots(ui: &MainWindow) {
     schedule_sweep(ui);
+    // CADENCE_TEST_SEARCH="ms|query|response.json": show a saved search response at ms.
+    if let Ok(spec) = std::env::var("CADENCE_TEST_SEARCH") {
+        let parts: Vec<String> = spec.splitn(3, '|').map(str::to_string).collect();
+        if let [ms, q, file] = &parts[..] {
+            let (q, file) = (q.clone(), file.clone());
+            slint::Timer::single_shot(Duration::from_millis(ms.parse().unwrap_or(1500)), move || browse::test_search(&q, &file));
+        }
+    }
     // CADENCE_TEST_SIDE_SEARCH="text": open the sidebar's playlist search with that text.
     if let Ok(q) = std::env::var("CADENCE_TEST_SIDE_SEARCH") {
         let b = ui.global::<Browse>();

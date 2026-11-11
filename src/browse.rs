@@ -360,7 +360,7 @@ impl<T: ArtRow> Model for LazyArt<T> {
 struct Models {
     shelves: Rc<VecModel<ShelfData>>,
     shelf_cards: RefCell<Vec<Rc<VecModel<Card>>>>,
-    found_tracks: Rc<VecModel<Song>>,
+    found_tracks: Rc<LazySongs>,
     found_shelves: Rc<VecModel<ShelfData>>,
     found_cards: RefCell<Vec<Rc<VecModel<Card>>>>,
     tracks: Rc<LazySongs>,
@@ -476,6 +476,9 @@ fn row(t: &TrackData, index: usize) -> Song {
         fresh: false,
     }
 }
+
+/// The search Top result's cover, logical pixels (ui/browse.slint TopResult).
+const TOP_ART: f32 = 96.0;
 
 /// Cover sizes of the song rows, in logical pixels (ui/track_row.slint).
 const TABLE_ART: f32 = 40.0;
@@ -630,7 +633,7 @@ fn new_page(ui: &MainWindow, page: &str, status: &str) -> u64 {
         m.disc.set_vec(Vec::new());
         m.find_tracks.set(Vec::new());
         m.find_cards.set_vec(Vec::new());
-        m.found_tracks.set_vec(Vec::new());
+        m.found_tracks.set(Vec::new());
         m.found_shelves.set_vec(Vec::new());
         m.found_cards.borrow_mut().clear();
         m.lib.set(Vec::new());
@@ -1191,7 +1194,7 @@ pub fn search(text: &str) {
     let b = ui.global::<Browse>();
     if q.is_empty() {
         with_models(|m| {
-            m.found_tracks.set_vec(Vec::new());
+            m.found_tracks.set(Vec::new());
             m.found_shelves.set_vec(Vec::new());
             m.found_cards.borrow_mut().clear();
         });
@@ -1218,11 +1221,14 @@ pub fn search(text: &str) {
     b.set_status("Searching…".into());
     let w = weak();
     crate::runtime().spawn(async move {
-        tokio::time::sleep(Duration::from_millis(280)).await;
+        // Debounce: only the query typing paused on goes out; older responses are ignored below.
+        tokio::time::sleep(Duration::from_millis(SEARCH_DEBOUNCE_MS)).await;
         if SEARCH.load(Relaxed) != s_gen {
             return;
         }
         let res = api::get("search", &[("q", &q), ("type", "track,artist,album,playlist,show,episode"), ("limit", "10")]).await;
+        // The user's own signals for ranking, read off the UI thread.
+        let me = tokio::task::spawn_blocking(personal).await.unwrap_or_default();
         let _ = w.upgrade_in_event_loop(move |ui| {
             if SEARCH.load(Relaxed) != s_gen || PAGE.load(Relaxed) != g {
                 return;
@@ -1230,14 +1236,41 @@ pub fn search(text: &str) {
             let b = ui.global::<Browse>();
             finish(&b);
             match res {
-                Ok(j) => apply_search(&ui, &q, &j, g),
+                Ok(j) => apply_search(&ui, &q, &j, &me, g),
                 Err(e) => show_error(&b, &e.to_string()),
             }
         });
     });
 }
 
-fn apply_search(ui: &MainWindow, q: &str, j: &Value, g: u64) {
+/// Test runs: the search page with `query` and a saved search response (no network).
+pub fn test_search(query: &str, response_file: &str) {
+    let Some(ui) = ui() else { return };
+    let Some(j) = std::fs::read(response_file).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else {
+        return crate::logln!("test: cannot read {response_file}");
+    };
+    go("search");
+    ui.global::<Browse>().set_query(query.into());
+    apply_search(&ui, query, &j, &personal(), PAGE.load(Relaxed));
+    finish(&ui.global::<Browse>());
+}
+
+/// Pause in typing before a search goes out.
+const SEARCH_DEBOUNCE_MS: u64 = 250;
+
+/// Local signals for search ranking: Liked Songs, Cadence's play history, followed artists and
+/// the artists played most. All from the local database; nothing is requested.
+fn personal() -> crate::rank::Personal {
+    let uris = |items: Vec<db::LibItem>| items.into_iter().map(|l| l.uri).collect();
+    crate::rank::Personal {
+        liked: uris(db::library_list("track", "", "recent", 20_000)),
+        played: db::most_played_uris(None, 500).into_iter().map(|p| p.0).collect(),
+        followed: uris(db::library_list("artist", "", "recent", 5000)),
+        frequent: db::top_artist_uris(50).into_iter().collect(),
+    }
+}
+
+fn apply_search(ui: &MainWindow, q: &str, j: &Value, me: &crate::rank::Personal, g: u64) {
     let b = ui.global::<Browse>();
     b.set_error("".into());
     let list = |k: &str| arr(&j[k]["items"]).to_vec();
@@ -1248,18 +1281,23 @@ fn apply_search(ui: &MainWindow, q: &str, j: &Value, g: u64) {
     let shows: Vec<CardData> = list("shows").iter().filter_map(api::show_card).collect();
     let episodes: Vec<CardData> = list("episodes").iter().filter_map(api::episode_card).collect();
 
-    // Top result: an exact name match (artist, album, track), else the first artist whose name
-    // contains the query, else the first track.
-    let ql = q.to_lowercase();
-    let exact = |c: &CardData| c.title.to_lowercase() == ql;
-    let top = artists
-        .iter()
-        .find(|c| exact(c))
-        .or_else(|| albums.iter().find(|c| exact(c)))
-        .cloned()
-        .or_else(|| tracks.iter().find(|t| t.title.to_lowercase() == ql).map(track_as_card))
-        .or_else(|| artists.iter().find(|c| c.title.to_lowercase().contains(&ql)).cloned())
-        .or_else(|| tracks.first().map(track_as_card));
+    // Ranking (src/rank.rs): Songs order, Top result, which artists are worth showing.
+    use crate::rank;
+    let ranked = rank::rank(
+        q,
+        &tracks.iter().map(|t| rank::Song { uri: t.uri.clone(), title: t.title.clone(), artist_uris: t.artist_uris.clone(), album_type: t.album_type.clone(), popularity: t.popularity }).collect::<Vec<_>>(),
+        &artists.iter().map(|a| rank::Artist { uri: a.uri.clone(), name: a.title.clone(), popularity: a.popularity, followers: a.followers }).collect::<Vec<_>>(),
+        &albums.iter().map(|a| rank::Album { title: a.title.clone(), artist_uris: a.artist_uris.clone() }).collect::<Vec<_>>(),
+        me,
+    );
+    let tracks: Vec<TrackData> = ranked.songs.iter().map(|&i| tracks[i].clone()).collect();
+    let top = match ranked.top {
+        Some(rank::Top::Song(i)) => tracks.get(i).map(track_as_card),
+        Some(rank::Top::Artist(i)) => artists.get(i).cloned(),
+        Some(rank::Top::Album(i)) => albums.get(i).cloned(),
+        None => None,
+    };
+    let artists: Vec<CardData> = ranked.artists.iter().map(|&i| artists[i].clone()).collect();
     match &top {
         Some(c) => {
             b.set_has_top(true);
@@ -1268,9 +1306,14 @@ fn apply_search(ui: &MainWindow, q: &str, j: &Value, g: u64) {
                 "album" => api::capitalize(if c.album_type.is_empty() { "album" } else { &c.album_type }),
                 _ => "Song".to_string(),
             };
+            b.set_top_kind(match c.kind.as_str() {
+                "artist" => "artist",
+                "album" => "album",
+                _ => "song",
+            }.into());
             let sub = if c.kind == "artist" { kind } else { format!("{kind} · {}", c.subtitle) };
             b.set_top(Card { title: c.title.as_str().into(), subtitle: sub.into(), uri: c.uri.as_str().into(), round: c.round, ..Default::default() });
-            art_into(&c.images, &c.art_url, 96.0, g, |ui, img, _, fresh| {
+            art_into(&c.images, &c.art_url, TOP_ART, g, |ui, img, _, fresh| {
                 let b = ui.global::<Browse>();
                 let mut t = b.get_top();
                 t.art = img;
@@ -1280,7 +1323,7 @@ fn apply_search(ui: &MainWindow, q: &str, j: &Value, g: u64) {
         }
         None => b.set_has_top(false),
     }
-    with_models(|m| m.found_tracks.set_vec(tracks.iter().take(5).enumerate().map(|(i, t)| row(t, i)).collect::<Vec<_>>()));
+    with_models(|m| m.found_tracks.set(tracks.iter().take(5).enumerate().map(|(i, t)| song(t, i, LIST_ART)).collect()));
     let enc = q.to_string();
     let sections: Vec<(&str, &str, Vec<CardData>)> = vec![
         ("Artists", "artist", artists),
@@ -1341,7 +1384,7 @@ fn search_enter(ui: &MainWindow) {
     let sel = b.get_search_sel();
     let tracks = with_models(|m| m.found_tracks.clone());
     if sel >= 0
-        && let Some(t) = tracks.row_data(sel as usize)
+        && let Some(t) = tracks.peek(sel as usize)
     {
         crate::queue::forget_restore();
         crate::with_player(|p| p.play(&t.uri, 0));
@@ -2834,7 +2877,7 @@ pub fn init(ui: &MainWindow) {
     let models = Models {
         shelves: Rc::new(VecModel::default()),
         shelf_cards: RefCell::new(Vec::new()),
-        found_tracks: Rc::new(VecModel::default()),
+        found_tracks: LazyArt::new(LIST_ART),
         found_shelves: Rc::new(VecModel::default()),
         found_cards: RefCell::new(Vec::new()),
         tracks: LazyArt::new(TABLE_ART),
@@ -2873,6 +2916,7 @@ pub fn init(ui: &MainWindow) {
             on_scrolled(&ui);
         }
     });
+    b.on_top_pause(crate::play_pause_cmd);
     let w = ui.as_weak();
     b.on_row_toggle(move |context, i, uri| {
         if let Some(ui) = w.upgrade() {

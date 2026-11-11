@@ -443,7 +443,7 @@ export component TableHeader inherits Rectangle {
     in property <bool> sort-desc;
     in property <bool> sortable: true;
     callback sort(string);
-    property <SongCols> c: SongColumns.table(root.width, true, root.show-album, root.show-added, root.show-heart, false, 0px);
+    property <SongCols> c: SongColumns.table(root.width, true, root.show-album, root.show-added, root.show-heart, false, 0px, SongColumns.inset);
     height: Tokens.row-sm;
     Rectangle {
         y: parent.height - Tokens.hairline;

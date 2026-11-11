@@ -255,6 +255,10 @@ pub struct CardData {
     /// Albums: "album" / "single" / "compilation"; release date for sorting.
     pub album_type: String,
     pub date: String,
+    /// Search ranking: artists of an album; popularity and followers when Spotify sends them.
+    pub artist_uris: Vec<String>,
+    pub popularity: Option<u8>,
+    pub followers: Option<u64>,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -275,6 +279,10 @@ pub struct TrackData {
     pub note: String,
     /// Cover sizes (at most three, see `sizes`); rows pick theirs with `art::pick_image`.
     pub images: Vec<SpImage>,
+    /// Artist uris, primary first; album type; popularity when Spotify sends it (search ranking).
+    pub artist_uris: Vec<String>,
+    pub album_type: String,
+    pub popularity: Option<u8>,
 }
 
 pub fn track(t: &Value) -> TrackData {
@@ -298,6 +306,9 @@ pub fn track(t: &Value) -> TrackData {
         explicit: t["explicit"].as_bool().unwrap_or(false),
         unavailable: t["is_playable"].as_bool() == Some(false),
         images: sizes(images(&t["album"]["images"])),
+        artist_uris: arr(&t["artists"]).iter().map(|a| s(&a["uri"]).to_string()).filter(|u| !u.is_empty()).collect(),
+        album_type: s(&t["album"]["album_type"]).to_string(),
+        popularity: t["popularity"].as_u64().map(|p| p.min(100) as u8),
         note: String::new(),
         uri,
     }
@@ -326,6 +337,7 @@ pub fn album_card(a: &Value) -> Option<CardData> {
         kind: "album".into(),
         album_type: kind,
         date: s(&a["release_date"]).to_string(),
+        artist_uris: arr(&a["artists"]).iter().map(|x| s(&x["uri"]).to_string()).collect(),
         ..Default::default()
     })
 }
@@ -342,6 +354,8 @@ pub fn artist_card(a: &Value) -> Option<CardData> {
         images: images(&a["images"]),
         round: true,
         kind: "artist".into(),
+        popularity: a["popularity"].as_u64().map(|p| p.min(100) as u8),
+        followers: a["followers"]["total"].as_u64(),
         ..Default::default()
     })
 }

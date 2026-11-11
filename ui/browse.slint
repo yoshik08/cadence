@@ -61,6 +61,8 @@ export global Browse {
     in-out property <int> sel-row: -1;
     callback play-all(string, bool);
     callback play-card(string);
+    // Pause from the search Top result's play button (it shows pause while its item plays).
+    callback top-pause();
     callback card-menu(string, length, length);
 
     // Home
@@ -92,6 +94,8 @@ export global Browse {
     in-out property <string> query;
     in property <bool> has-top;
     in property <Card> top;
+    // "song" | "artist" | "album".
+    in property <string> top-kind;
     in property <[Song]> found-tracks;
     in property <[ShelfData]> found-shelves;
     in property <[string]> history;
@@ -507,60 +511,88 @@ component HomePage inherits PageFade {
     }
 }
 
-// The "Top result" tile on the search page.
+// The search page's Top result: fixed width, height by content, top-aligned under its header.
+// Song tile: cover, title, a music icon and "Song · Artist". Artist tile: round photo, name,
+// "Artist". The accent play button rises in on hover and stays while this item plays.
 component TopResult inherits Rectangle {
-    property <length> tile-height: 220px;
     property <length> art: 96px;
     property <length> play: 48px;
     property <bool> hot: ta.has-hover || play-ta.has-hover;
-    height: root.tile-height;
+    property <bool> song: Browse.top-kind == "song";
+    property <bool> artist: Browse.top-kind == "artist";
+    // This item is what is playing: the song itself, or the artist as the context.
+    property <bool> playing: Playback.playing && (root.song ? Browse.current-uri == Browse.top.uri : Playback.context-uri == Browse.top.uri);
+    property <bool> button-shown: root.hot || root.playing;
+    width: Tokens.panel-width;
+    height: body.preferred-height;
+    vertical-stretch: 0;
     border-radius: Tokens.radius-lg;
     background: ta.pressed ? Tokens.bg-surface : root.hot ? Tokens.bg-elevated : Tokens.bg-surface;
     animate background { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
-    ArtTile {
-        x: Tokens.space-xl;
-        y: Tokens.space-xl;
-        width: root.art;
-        height: root.art;
-        radius: Browse.top.round ? root.art / 2 : Tokens.radius-md;
-        backdrop: root.hot ? Tokens.bg-elevated : Tokens.bg-surface;
-        source: Browse.top.art;
-        fade: Browse.top.fresh;
-    }
-    Label {
-        x: Tokens.space-xl;
-        y: Tokens.space-xl + root.art + Tokens.space-lg;
-        width: parent.width - 2 * Tokens.space-xl;
-        text: Browse.top.title;
-        font-size: Tokens.size-title;
-        font-weight: Tokens.weight-bold;
-        letter-spacing: Tokens.tracking-title;
-    }
-    Caption {
-        x: Tokens.space-xl;
-        y: parent.height - Tokens.space-xl - self.height;
-        width: parent.width - 2 * Tokens.space-xl - root.play - Tokens.space-md;
-        text: Browse.top.subtitle;
+    body := VerticalLayout {
+        padding: Tokens.space-xl;
+        spacing: Tokens.space-lg;
+        alignment: start;
+        ArtTile {
+            width: root.art;
+            height: root.art;
+            radius: root.artist ? root.art / 2 : Tokens.radius-md;
+            backdrop: root.hot ? Tokens.bg-elevated : Tokens.bg-surface;
+            source: Browse.top.art;
+            fade: Browse.top.fresh;
+        }
+        VerticalLayout {
+            spacing: Tokens.space-xs;
+            Label {
+                text: Browse.top.title;
+                font-size: Tokens.size-title;
+                font-weight: Tokens.weight-bold;
+                letter-spacing: Tokens.tracking-title;
+            }
+            HorizontalLayout {
+                spacing: Tokens.space-xs;
+                // Leave room for the play button so the text never runs under it.
+                padding-right: root.play;
+                if root.song : Glyph {
+                    y: (parent.height - self.height) / 2;
+                    size: Tokens.icon-sm;
+                    commands: Icons.music;
+                    tint: Tokens.text-secondary;
+                }
+                Caption { text: Browse.top.subtitle; horizontal-stretch: 1; }
+            }
+        }
     }
     ta := TouchArea { clicked => { Browse.open(Browse.top.uri); } }
     Rectangle {
         x: parent.width - self.width - Tokens.space-lg;
-        y: parent.height - self.height - Tokens.space-lg;
+        y: parent.height - self.height - Tokens.space-lg + (root.button-shown ? 0px : Tokens.slide);
         width: root.play;
         height: root.play;
         border-radius: Tokens.radius-full;
-        background: Tokens.accent;
-        opacity: root.hot ? 1 : 0;
-        animate opacity { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+        background: play-ta.pressed ? Tokens.accent.darker(0.1) : Tokens.accent;
+        opacity: root.button-shown ? 1 : 0;
+        animate opacity { duration: Tokens.duration-base; easing: Tokens.ease-out; }
+        animate y { duration: Tokens.duration-base; easing: Tokens.ease-out; }
         Glyph {
-            x: (parent.width - self.width) / 2 + Tokens.hairline;
+            x: (parent.width - self.width) / 2 + (root.playing ? 0px : Tokens.hairline);
             y: (parent.height - self.height) / 2;
             size: Tokens.icon-lg;
             solid: true;
             tint: Tokens.on-accent;
-            commands: Icons.play;
+            commands: root.playing ? Icons.pause : Icons.play;
         }
-        play-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { Browse.play-card(Browse.top.uri); } }
+        play-ta := TouchArea {
+            enabled: root.button-shown;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                if (root.playing) {
+                    Browse.top-pause();
+                } else {
+                    Browse.play-card(Browse.top.uri);
+                }
+            }
+        }
     }
 }
 
@@ -645,35 +677,47 @@ component SearchPage inherits PageFade {
                         }
                     }
                 }
+                // Top result and Songs side by side. Both columns start with a header of the same
+                // height and gap, so the tile's top edge meets the first song row's; each column's
+                // `alignment: start` keeps leftover height below its content, not above.
                 if Browse.has-top || Browse.found-tracks.length > 0 : HorizontalLayout {
                     padding-left: Tokens.page-margin;
                     padding-right: Tokens.page-margin;
                     spacing: Tokens.space-xl;
                     if Browse.has-top : VerticalLayout {
-                        width: root.top-width;
+                        width: Tokens.panel-width;
+                        horizontal-stretch: 0;
                         spacing: Tokens.space-md;
+                        alignment: start;
                         SectionHeader { title: "Top result"; inset: 0px; }
                         TopResult { }
                     }
                     if Browse.found-tracks.length > 0 : VerticalLayout {
                         horizontal-stretch: 1;
                         spacing: Tokens.space-md;
+                        alignment: start;
                         SectionHeader {
                             title: "Songs";
                             inset: 0px;
                             action: "Show all";
                             action-clicked => { Browse.open("showall:track:" + Browse.query); }
                         }
-                        for t[i] in Browse.found-tracks : TrackItem {
-                            item: t;
-                            number: 0;
-                            show-album: false;
-                            show-heart: false;
-                            selected: Browse.search-sel == i;
-                            playing: t.uri == Browse.current-uri;
-                            clicked => { Browse.search-sel = i; }
-                            double-clicked => { Browse.play(t.uri, 0); }
-                            menu(x, y) => { Menu.for-item(t.uri, "", -1, "", x, y); }
+                        VerticalLayout {
+                            spacing: 0px;
+                            for t[i] in Browse.found-tracks : TrackRow {
+                                item: t;
+                                variant: "list";
+                                inset: 0px;
+                                show-heart: false;
+                                selected: Browse.search-sel == i;
+                                current: t.uri != "" && t.uri == Browse.current-uri;
+                                playing: Playback.playing;
+                                clicked => { Browse.search-sel = i; }
+                                double-clicked => { Browse.play(t.uri, 0); }
+                                play-pause => { Browse.row-toggle(t.uri, 0, t.uri); }
+                                menu(x, y) => { Menu.for-item(t.uri, "", -1, "", x, y); }
+                                more(x, y) => { Menu.for-item(t.uri, "", -1, "", x, y); }
+                            }
                         }
                     }
                 }

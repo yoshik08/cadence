@@ -247,6 +247,15 @@ pub struct Top {
     pub ms: i64,
 }
 
+/// Uris of the artists Cadence has played most (search ranking).
+pub fn top_artist_uris(limit: usize) -> Vec<String> {
+    let c = conn();
+    let Ok(mut st) = c.prepare("SELECT artist_uri FROM plays WHERE artist_uri != '' GROUP BY artist_uri ORDER BY COUNT(*) DESC LIMIT ?1") else {
+        return Vec::new();
+    };
+    st.query_map(params![limit as i64], |r| r.get(0)).map(|it| it.flatten().collect()).unwrap_or_default()
+}
+
 /// Top songs / artists / albums since `since` (unix seconds; 0 = all time).
 pub fn top(what: &str, since: i64, limit: usize) -> Vec<Top> {
     let (key, title, sub) = match what {

@@ -99,9 +99,9 @@ export global SongColumns {
     out property <length> table-art: 40px;
     out property <length> list-art: 48px;
 
-    public pure function table(width: length, table: bool, show-album: bool, show-added: bool, show-heart: bool, has-action: bool, lead: length) -> SongCols {
-        let x0 = self.inset + self.pad;
-        let right = width - self.inset - self.pad;
+    public pure function table(width: length, table: bool, show-album: bool, show-added: bool, show-heart: bool, has-action: bool, lead: length, inset: length) -> SongCols {
+        let x0 = inset + self.pad;
+        let right = width - inset - self.pad;
         let more-x = right - self.button-width;
         let duration-x = more-x - self.duration-width;
         let heart-x = duration-x - (show-heart ? self.button-width : 0px);
@@ -178,6 +178,8 @@ export component TrackRow inherits Rectangle {
     in property <bool> removable;
     in property <length> lead;
     in property <bool> lifted;
+    // Gap between the list's edge and the row's background (0 where a column already has margins).
+    in property <length> inset: SongColumns.inset;
     callback clicked();
     callback double-clicked();
     // Play / pause from this row's play button.
@@ -192,7 +194,7 @@ export component TrackRow inherits Rectangle {
     callback dragged(length, bool);
 
     property <bool> table: root.variant == "table";
-    property <SongCols> c: SongColumns.table(root.width, root.table, root.show-album, root.show-added, root.show-heart, root.action-label != "", root.lead);
+    property <SongCols> c: SongColumns.table(root.width, root.table, root.show-album, root.show-added, root.show-heart, root.action-label != "", root.lead, root.inset);
     property <length> art-size: root.table ? SongColumns.table-art : SongColumns.list-art;
     property <length> art-x: root.table ? root.c.title-x : root.c.x0 + root.lead;
     property <length> text-x: root.art-x + root.art-size + Tokens.space-md;
@@ -217,8 +219,8 @@ export component TrackRow inherits Rectangle {
     opacity: root.enabled ? 1 : root.unavailable-opacity;
 
     ListRow {
-        x: SongColumns.inset;
-        width: parent.width - 2 * SongColumns.inset;
+        x: root.inset;
+        width: parent.width - 2 * root.inset;
         border-radius: Tokens.radius-sm;
         hovered: root.hot;
         pressed: ta.pressed;
