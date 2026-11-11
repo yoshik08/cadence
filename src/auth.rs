@@ -48,31 +48,168 @@ const STREAM_SCOPES: &[&str] = &[
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// `%APPDATA%\cadence`, created on first call.
+/// `%APPDATA%\cadence`, created on first call. Debug builds: `CADENCE_DATA_DIR` replaces it, so
+/// tests never touch the real folder.
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("cadence");
+    #[cfg(debug_assertions)]
+    let over = std::env::var_os("CADENCE_DATA_DIR").map(PathBuf::from);
+    #[cfg(not(debug_assertions))]
+    let over: Option<PathBuf> = None;
+    let dir = over.unwrap_or_else(|| {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("cadence")
+    });
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("auth: cannot create {}: {e}", dir.display());
     }
     dir
 }
 
-/// `SPOTIFY_CLIENT_ID`, else the first line of `data_dir()/client_id.txt`.
+const CLIENT_ID_FILE: &str = "client_id.txt";
+
+/// A Spotify Client ID: exactly 32 hex characters once whitespace (and a BOM) is trimmed.
+pub fn valid_client_id(s: &str) -> Option<String> {
+    let s = s.trim_start_matches('\u{feff}').trim();
+    (s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| s.to_ascii_lowercase())
+}
+
+/// The message the setup card and Settings show for an ID that isn't valid.
+pub const CLIENT_ID_HINT: &str = "A Client ID is 32 letters and numbers (0-9, a-f). Copy it from your app's Settings in the Spotify Dashboard.";
+
+/// The valid ID on the first line of `dir/client_id.txt`.
+pub fn read_client_id(dir: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(CLIENT_ID_FILE)).ok()?;
+    valid_client_id(text.lines().next()?)
+}
+
+/// Writes `id` to `dir/client_id.txt` atomically (temp file in the same folder, then rename)
+/// and reads it back. The ID is never logged.
+pub fn save_client_id(dir: &std::path::Path, id: &str) -> Result<String, String> {
+    let id = valid_client_id(id).ok_or_else(|| CLIENT_ID_HINT.to_string())?;
+    let path = dir.join(CLIENT_ID_FILE);
+    let tmp = dir.join("client_id.txt.tmp");
+    std::fs::write(&tmp, format!("{id}\n"))
+        .and_then(|_| std::fs::rename(&tmp, &path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("Couldn't save the Client ID ({e}).")
+        })?;
+    match read_client_id(dir) {
+        Some(back) if back == id => Ok(id),
+        _ => Err("The Client ID didn't save correctly. Try again.".into()),
+    }
+}
+
+/// The Client ID from `dir`, importing a valid `env` value into the file when the file has none.
+pub fn client_id_in(dir: &std::path::Path, env: Option<&str>) -> Option<String> {
+    if let Some(id) = read_client_id(dir) {
+        return Some(id);
+    }
+    let id = valid_client_id(env?)?;
+    match save_client_id(dir, &id) {
+        Ok(_) => crate::logln!("auth: imported the Client ID from SPOTIFY_CLIENT_ID into client_id.txt"),
+        Err(e) => crate::logln!("auth: Client ID import failed: {e}"),
+    }
+    Some(id)
+}
+
+/// `client_id.txt`, else `SPOTIFY_CLIENT_ID` (written to the file once, so the env var is never
+/// needed again).
 pub fn client_id() -> Option<String> {
-    let clean = |s: &str| {
-        let s = s.trim_start_matches('\u{feff}').trim();
-        (!s.is_empty()).then(|| s.to_owned())
-    };
-    std::env::var("SPOTIFY_CLIENT_ID")
-        .ok()
-        .and_then(|v| clean(&v))
-        .or_else(|| {
-            let text = std::fs::read_to_string(data_dir().join("client_id.txt")).ok()?;
-            clean(text.lines().next()?)
-        })
+    let env = std::env::var("SPOTIFY_CLIENT_ID").ok();
+    client_id_in(&data_dir(), env.as_deref())
+}
+
+/// `1a2b…9f0e` for display.
+pub fn mask_client_id(id: &str) -> String {
+    if id.len() < 8 {
+        return "••••".into();
+    }
+    format!("{}••••••••{}", &id[..4], &id[id.len() - 4..])
+}
+
+/// The two token files Sign out removes. client_id.txt is never among them.
+pub fn token_files(dir: &std::path::Path) -> [PathBuf; 2] {
+    [dir.join("web_token.json"), dir.join("librespot").join("credentials.json")]
+}
+
+/// Sign out: deletes only the token files.
+pub fn sign_out(dir: &std::path::Path) {
+    for f in token_files(dir) {
+        let _ = std::fs::remove_file(f);
+    }
+    crate::logln!("auth: signed out (token files removed, Client ID kept)");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cadence-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    const ID: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn validation() {
+        assert_eq!(valid_client_id(&format!("  {ID}\r\n")).as_deref(), Some(ID));
+        assert_eq!(valid_client_id(&format!("\u{feff}{}", ID.to_uppercase())).as_deref(), Some(ID));
+        assert!(valid_client_id("0123456789abcdef").is_none());
+        assert!(valid_client_id(&format!("{ID}0")).is_none());
+        assert!(valid_client_id("0123456789abcdef0123456789abcdeg").is_none());
+        assert!(valid_client_id("").is_none());
+        assert!(valid_client_id("0123456789abcdef 0123456789abcde").is_none());
+    }
+
+    #[test]
+    fn atomic_save_and_read_back() {
+        let d = temp("save");
+        assert!(save_client_id(&d, "nope").is_err());
+        assert!(!d.join(CLIENT_ID_FILE).exists());
+        assert_eq!(save_client_id(&d, ID).as_deref(), Ok(ID));
+        assert_eq!(read_client_id(&d).as_deref(), Some(ID));
+        assert!(!d.join("client_id.txt.tmp").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn env_import_only_when_file_missing() {
+        let d = temp("env");
+        assert_eq!(client_id_in(&d, None), None);
+        assert_eq!(client_id_in(&d, Some("bad")), None);
+        assert!(!d.join(CLIENT_ID_FILE).exists());
+        assert_eq!(client_id_in(&d, Some(ID)).as_deref(), Some(ID));
+        assert_eq!(read_client_id(&d).as_deref(), Some(ID));
+        // The file wins over a different env value.
+        let other = "ffffffffffffffffffffffffffffffff";
+        assert_eq!(client_id_in(&d, Some(other)).as_deref(), Some(ID));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn sign_out_keeps_client_id() {
+        let d = temp("signout");
+        save_client_id(&d, ID).unwrap();
+        std::fs::create_dir_all(d.join("librespot")).unwrap();
+        for f in token_files(&d) {
+            std::fs::write(f, "{}").unwrap();
+        }
+        sign_out(&d);
+        assert!(token_files(&d).iter().all(|f| !f.exists()));
+        assert_eq!(read_client_id(&d).as_deref(), Some(ID));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn mask() {
+        assert_eq!(mask_client_id(ID), "0123••••••••cdef");
+    }
 }
 
 /// librespot cache: credentials and volume under `data_dir()/librespot`; audio under

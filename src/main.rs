@@ -26,6 +26,7 @@ mod prefs;
 mod queue;
 mod rank;
 mod settings;
+mod setup;
 mod sleep;
 mod smtc;
 mod stats;
@@ -697,10 +698,34 @@ async fn startup(ui: slint::Weak<MainWindow>) {
     }
     let rt = tokio::runtime::Handle::current();
     let mut browse_started = false;
-    match auth::client_id() {
-        Some(id) => {
-            set_status(&ui, "Signing in to Spotify…".into());
-            match web::Web::connect(&id).await {
+    // No valid Client ID: the setup card asks for one (streaming waits, so two browser tabs
+    // never compete). Existing users with a valid client_id.txt never see it.
+    let first_run = auth::client_id().is_none();
+    let mut client_id = auth::client_id();
+    if first_run {
+        client_id = Some(setup::wait_for_client_id(&ui).await);
+    }
+    match client_id {
+        Some(mut id) => {
+            let web = loop {
+                let text = if web::stored_needs_consent(&auth::data_dir()) {
+                    "Cadence needs one more Spotify permission. Approve it once in your browser…"
+                } else {
+                    "Signing in to Spotify…"
+                };
+                set_status(&ui, text.into());
+                let r = web::Web::connect(&id).await;
+                match r {
+                    Err(e) if first_run => {
+                        logln!("auth: Web API sign-in during setup failed: {e}");
+                        let msg = if web::is_invalid_client(&e) { web::INVALID_CLIENT.replace(" Settings > Change Client ID.", " Check it and try again.") } else { format!("Sign-in didn't finish ({e}). Click Continue to try again.") };
+                        setup::first_run_failed(&ui, msg);
+                        id = setup::wait_for_client_id(&ui).await;
+                    }
+                    r => break r,
+                }
+            };
+            match web {
                 Ok(spotify) => {
                     logln!("auth: Web API ready");
                     let _ = WEB.set(spotify.clone());
@@ -725,21 +750,23 @@ async fn startup(ui: slint::Weak<MainWindow>) {
                 Err(e) => {
                     logln!("auth: Web API failed: {e}");
                     WEB_PENDING.store(false, Ordering::Relaxed);
-                    let _ = ui.upgrade_in_event_loop(|_| {
-                        browse::on_web_unavailable("Couldn't sign in to Spotify. Settings > Re-authorize, or restart Cadence.")
+                    // A rejected Client ID is never deleted: the user gets a message and
+                    // Settings > Change Client ID.
+                    let invalid = web::is_invalid_client(&e);
+                    let _ = ui.upgrade_in_event_loop(move |ui| {
+                        ui.global::<Settings>().set_client_id_invalid(invalid);
+                        browse::on_web_unavailable(if invalid {
+                            web::INVALID_CLIENT
+                        } else {
+                            "Couldn't sign in to Spotify. Settings > Re-authorize, or restart Cadence."
+                        })
                     });
                     browse_started = true;
                 }
             }
         }
-        None => {
-            eprintln!(
-                "auth: SPOTIFY_CLIENT_ID is missing (env var or %APPDATA%\\cadence\\client_id.txt); no Web API, streaming only"
-            );
-            WEB_PENDING.store(false, Ordering::Relaxed);
-            let _ = ui.upgrade_in_event_loop(|_| browse::on_web_unavailable("Add your Spotify client ID to load your library. See README."));
-            browse_started = true;
-        }
+        // Unreachable: the first run waits for a Client ID.
+        None => {}
     }
 
     if let Err(e) = stream(&ui, rt).await {
@@ -755,7 +782,13 @@ async fn startup(ui: slint::Weak<MainWindow>) {
 async fn stream(ui: &slint::Weak<MainWindow>, rt: tokio::runtime::Handle) -> Result<(), String> {
     let cache = auth::librespot_cache();
     let cached = cache.credentials().is_some();
-    let creds = auth::streaming_credentials(&cache).await?;
+    if !cached {
+        setup::set_step(ui, setup::STEP_STREAMING);
+    }
+    let creds = auth::streaming_credentials(&cache).await;
+    // First launch: both approvals done (or streaming failed: the card must not trap the user).
+    setup::finish_first_run(ui);
+    let creds = creds?;
     let (player, mut events) = match Player::start(creds, cache).await {
         Ok(started) => started,
         Err(e) if cached => {
@@ -1309,6 +1342,7 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     dialogs::init(&ui);
     settings::init(&ui);
+    setup::init(&ui);
     let weak = ui.as_weak();
     pb.on_track_menu(move |x, y| {
         if let Some(ui) = weak.upgrade() {

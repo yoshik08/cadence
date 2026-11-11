@@ -153,9 +153,27 @@ impl ApiError {
     }
 }
 
+/// Shown when Spotify answers `invalid_client`: the saved Client ID is wrong or its app was
+/// deleted. Every file is kept; the user changes the ID in Settings.
+pub const INVALID_CLIENT: &str = "Spotify doesn't recognize this Client ID. Settings > Change Client ID.";
+
+pub fn is_invalid_client(e: &ApiError) -> bool {
+    matches!(e, ApiError::Auth(m) if m == INVALID_CLIENT)
+}
+
+/// The stored token lacks a scope this version asks for, so the next start asks once more.
+pub fn stored_needs_consent(dir: &std::path::Path) -> bool {
+    std::fs::read(dir.join("web_token.json"))
+        .ok()
+        .and_then(|b| Token::from_json(&b))
+        .is_some_and(|t| !t.has_scopes())
+}
+
 enum RefreshError {
     /// The refresh token is dead: discard it.
     InvalidGrant,
+    /// The Client ID itself is rejected: keep the token and the ID, tell the user.
+    InvalidClient,
     /// Network or server trouble: keep the token and try again later.
     Transient(String),
 }
@@ -172,14 +190,31 @@ pub struct Web {
 
 impl Web {
     /// Loads the stored token (refreshing it if stale) or runs the browser sign-in.
-    pub async fn connect(client_id: &str) -> Result<Arc<Web>, ApiError> {
-        let web = Arc::new(Web {
+    fn new(client_id: &str, path: PathBuf) -> Web {
+        Web {
             http: crate::http::client().clone(),
             client_id: client_id.to_string(),
-            path: crate::auth::data_dir().join("web_token.json"),
+            path,
             token: tokio::sync::Mutex::new(None),
             on_sign_in: std::sync::Mutex::new(None),
-        });
+        }
+    }
+
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    /// Change Client ID: a browser sign-in with `client_id` whose token goes to `path` (a side
+    /// file), so the current login stays until the caller swaps the files in.
+    pub async fn sign_in_to(client_id: &str, path: PathBuf) -> Result<(), ApiError> {
+        let web = Web::new(client_id, path);
+        let t = web.sign_in().await?;
+        web.save(&t);
+        Ok(())
+    }
+
+    pub async fn connect(client_id: &str) -> Result<Arc<Web>, ApiError> {
+        let web = Arc::new(Web::new(client_id, crate::auth::data_dir().join("web_token.json")));
         let stored = std::fs::read(&web.path).ok().and_then(|b| Token::from_json(&b));
         match &stored {
             Some(t) if !t.has_scopes() => logln!("auth: stored token lacks scopes, signing in again"),
@@ -204,12 +239,13 @@ impl Web {
 
     #[allow(dead_code)] // Settings > Re-authorize (CHECKLIST 3.12).
     /// Forgets the token and signs in again in the browser (Settings > Re-authorize).
+    /// The current token stays (in memory and on disk) until the new sign-in succeeds; the
+    /// Client ID is never touched.
     pub async fn reauthorize(&self) -> Result<(), ApiError> {
         let mut t = self.token.lock().await;
-        *t = None;
-        let _ = std::fs::remove_file(&self.path);
-        *t = Some(self.sign_in().await?);
-        self.save(t.as_ref().unwrap());
+        let new = self.sign_in().await?;
+        self.save(&new);
+        *t = Some(new);
         Ok(())
     }
 
@@ -233,6 +269,10 @@ impl Web {
                     let access = new.access.clone();
                     *t = Some(new);
                     return Ok(access);
+                }
+                Err(RefreshError::InvalidClient) => {
+                    logln!("auth: refresh failed: invalid_client (token and Client ID kept)");
+                    return Err(ApiError::Auth(INVALID_CLIENT.into()));
                 }
                 Err(RefreshError::InvalidGrant) => {
                     logln!("auth: refresh failed: invalid_grant, discarding token and signing in again");
@@ -272,6 +312,9 @@ impl Web {
         let body: Value = resp.json().await.unwrap_or(Value::Null);
         if status == StatusCode::BAD_REQUEST && body["error"].as_str() == Some("invalid_grant") {
             return Err(RefreshError::InvalidGrant);
+        }
+        if body["error"].as_str() == Some("invalid_client") {
+            return Err(RefreshError::InvalidClient);
         }
         if !status.is_success() {
             return Err(RefreshError::Transient(format!(
@@ -340,6 +383,9 @@ impl Web {
         let body: Value = resp.json().await.unwrap_or(Value::Null);
         if !status.is_success() {
             logln!("auth: code exchange failed: HTTP {} {}", status.as_u16(), body["error"].as_str().unwrap_or(""));
+            if body["error"].as_str() == Some("invalid_client") {
+                return Err(ApiError::Auth(INVALID_CLIENT.into()));
+            }
             return Err(ApiError::Auth(format!("token exchange failed ({})", status.as_u16())));
         }
         let blank = Token { access: String::new(), refresh: None, expires_at: 0, scope: String::new(), authorized_at: at };

@@ -72,6 +72,7 @@ pub fn refresh(ui: &MainWindow) {
     st.set_local_folders(ModelRc::new(VecModel::from(crate::local::folders().into_iter().map(SharedString::from).collect::<Vec<_>>())));
     st.set_private_session(prefs::bool_or("private_session", false));
     st.set_debug_log(prefs::bool_or("debug_log", false));
+    st.set_client_id_masked(crate::auth::read_client_id(&crate::auth::data_dir()).map(|id| crate::auth::mask_client_id(&id)).unwrap_or_default().into());
     refresh_devices(ui);
     refresh_info(ui);
 }
@@ -234,6 +235,14 @@ fn action(ui: &MainWindow, a: &str) {
             });
         }
         "log-open" => crate::winint::shell_open(&crate::cache::dir("..").display().to_string()),
+        "change-client-id" => crate::setup::open_change(ui),
+        "sign-out" => {
+            crate::dialogs::confirm(ui, "Sign out of Spotify?", "Cadence removes its Spotify sign-in from this PC and quits. Your Client ID and settings stay; the next start asks you to approve again.", "Sign out", true, |_| {
+                crate::queue::save();
+                crate::auth::sign_out(&crate::auth::data_dir());
+                let _ = slint::quit_event_loop();
+            });
+        }
         "account-apps" => crate::winint::shell_open("https://www.spotify.com/account/apps/"),
         "reauth" => {
             let Some(web) = crate::web() else {

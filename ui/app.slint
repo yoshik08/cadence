@@ -9,6 +9,7 @@ import { Settings, SettingsPage, DeviceRow } from "settings.slint";
 import { NowPlayingPanel } from "side.slint";
 import { MiniWindow, OsdWindow } from "mini.slint";
 import { TipOverlay } from "base.slint";
+import { Setup, SetupOverlay } from "setup.slint";
 // The lyrics page type (yoshik.xyz uses Bricolage Grotesque; these are static instances of it).
 import "../assets/fonts/Bricolage-500.ttf";
 import "../assets/fonts/Bricolage-600.ttf";
@@ -18,7 +19,7 @@ import "../assets/fonts/JetBrainsMono-500.ttf";
 
 export {
     Menu, MenuItem, Queue, QueueRow, Browse, Card, Song, ShelfData, SideItem, StatRow, Playback,
-    LyrLine, LyrRow, LyrWord, LyrLetter, KWord, KMotion, Dialog, Settings, DeviceRow, MiniWindow, OsdWindow
+    LyrLine, LyrRow, LyrWord, LyrLetter, KWord, KMotion, Dialog, Settings, DeviceRow, MiniWindow, OsdWindow, Setup
 }
 
 export component MainWindow inherits Window {
@@ -169,6 +170,13 @@ export component MainWindow inherits Window {
         }
 
         LyricsOverlay {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+        }
+
+        SetupOverlay {
             x: 0px;
             y: 0px;
             width: root.width;

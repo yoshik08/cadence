@@ -44,6 +44,9 @@ export global Settings {
     // Privacy and account
     in-out property <bool> private-session;
     in property <string> account-info;
+    // "1a2b••••••••9f0e", and whether Spotify rejected it ("invalid client").
+    in property <string> client-id-masked;
+    in property <bool> client-id-invalid;
     in property <string> memory;
     in-out property <bool> debug-log;
     in property <bool> restart-needed;
@@ -295,6 +298,18 @@ export component SettingsPage inherits PageFade {
                     label: "Spotify sign-in";
                     hint: Settings.account-info;
                     Button { y: (parent.height - self.height) / 2; size: Tokens.control-sm; text: "Re-authorize Spotify"; clicked => { Settings.action("reauth"); } }
+                }
+                Row {
+                    label: "Client ID";
+                    hint: Settings.client-id-invalid
+                        ? "Spotify doesn't recognize this Client ID. Change it to load your library again."
+                        : (Settings.client-id-masked != "" ? Settings.client-id-masked : "Not set");
+                    Button { y: (parent.height - self.height) / 2; size: Tokens.control-sm; kind: Settings.client-id-invalid ? "primary" : "secondary"; text: "Change Client ID"; clicked => { Settings.action("change-client-id"); } }
+                }
+                Row {
+                    label: "Sign out";
+                    hint: "Removes Cadence's Spotify sign-in from this PC and quits. Your Client ID and settings stay.";
+                    Button { y: (parent.height - self.height) / 2; size: Tokens.control-sm; text: "Sign out"; clicked => { Settings.action("sign-out"); } }
                 }
                 Row {
                     label: "Apps connected to your Spotify account";

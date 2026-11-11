@@ -1,0 +1,126 @@
+// First-launch setup: the Client ID card (also used by Settings > Change Client ID).
+// Shown only while no valid Client ID exists, or while a change is in progress.
+import { Tokens } from "tokens.slint";
+import { ScrollView } from "std-widgets.slint";
+import { Label, Caption, Button, Field } from "widgets.slint";
+
+export global Setup {
+    in-out property <bool> shown;
+    // Settings > Change Client ID: different title, and a Cancel button.
+    in property <bool> changing;
+    in-out property <string> client-id;
+    in property <string> error;
+    // "Step 1 of 2 ..." while the browser sign-ins run.
+    in property <string> step;
+    in property <bool> busy;
+    // From web::REDIRECT, the constant the sign-in sends.
+    in property <string> redirect-uri;
+    in property <string> note;
+
+    callback paste();
+    callback submit();
+    callback copy-redirect();
+    callback open-dashboard();
+    callback cancel();
+}
+
+component Step inherits HorizontalLayout {
+    in property <string> number;
+    in property <string> text;
+    property <length> number-width: 24px;
+    spacing: Tokens.space-xs;
+    Label { text: root.number; width: root.number-width; color: Tokens.text-tertiary; }
+    Label { text: root.text; wrap: word-wrap; horizontal-stretch: 1; color: Tokens.text-secondary; }
+}
+
+export component SetupOverlay inherits Rectangle {
+    property <length> card-max: 600px;
+    property <length> card-pad: 40px;
+    property <length> number-width: 24px;
+    property <length> card-w: Math.min(root.card-max, root.width - 2 * Tokens.space-xl);
+    visible: Setup.shown;
+    background: Tokens.bg-base;
+    // Swallow clicks so nothing behind the card reacts.
+    TouchArea { }
+
+    ScrollView {
+        width: root.width;
+        height: root.height;
+        content-width: self.visible-width;
+        content-height: col.preferred-height + 2 * Tokens.space-2xl;
+
+        card := Rectangle {
+            x: (parent.visible-width - root.card-w) / 2;
+            y: Math.max(Tokens.space-2xl, (parent.visible-height - self.height) / 2);
+            width: root.card-w;
+            height: col.preferred-height;
+            background: Tokens.bg-base;
+            border-radius: Tokens.radius-lg;
+            border-width: Tokens.hairline;
+            border-color: Tokens.border-strong;
+
+            col := VerticalLayout {
+                padding: root.card-pad;
+                spacing: Tokens.space-lg;
+
+                Label {
+                    text: Setup.changing ? "Change your Client ID" : "Enter your Client ID";
+                    font-size: Tokens.size-title;
+                    font-weight: Tokens.weight-bold;
+                    letter-spacing: Tokens.tracking-title;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: Tokens.space-sm;
+                    Field {
+                        horizontal-stretch: 1;
+                        height: Tokens.control-lg;
+                        placeholder: "32 letters and numbers";
+                        text <=> Setup.client-id;
+                        enabled: !Setup.busy;
+                        auto-focus: true;
+                        accepted => { Setup.submit(); }
+                    }
+                    Button { text: "Paste"; enabled: !Setup.busy; clicked => { Setup.paste(); } }
+                }
+
+                if Setup.error != "" : Caption { text: Setup.error; wrap: word-wrap; color: Tokens.danger; }
+                if Setup.step != "" : Label { text: Setup.step; wrap: word-wrap; color: Tokens.text-primary; }
+
+                HorizontalLayout {
+                    spacing: Tokens.space-sm;
+                    alignment: start;
+                    Button { kind: "primary"; text: Setup.busy ? "Waiting for your browser…" : "Continue"; enabled: !Setup.busy; clicked => { Setup.submit(); } }
+                    Button { text: "Open Spotify Dashboard"; clicked => { Setup.open-dashboard(); } }
+                    if Setup.changing : Button { kind: "ghost"; text: "Cancel"; enabled: !Setup.busy; clicked => { Setup.cancel(); } }
+                }
+
+                Rectangle { height: Tokens.hairline; background: Tokens.border; }
+
+                Label { text: "How to get your Client ID (takes about 2 minutes). Your Spotify account needs Premium to create an app."; wrap: word-wrap; font-weight: Tokens.weight-semibold; }
+                VerticalLayout {
+                    spacing: Tokens.space-sm;
+                    Step { number: "1."; text: "Click Open Spotify Dashboard and log in."; }
+                    Step { number: "2."; text: "Click Create app (top right)."; }
+                    Step { number: "3."; text: "App name: anything, for example Cadence."; }
+                    Step { number: "4."; text: "App description: anything, for example My music player. Required."; }
+                    Step { number: "5."; text: "Website: leave blank."; }
+                    Step { number: "6."; text: "Redirect URIs: click Copy below, paste it in the field, then click the Add button next to the field. It must show in the list before you save. After saving, check it still reads 127.0.0.1 and not localhost."; }
+                    HorizontalLayout {
+                        padding-left: root.number-width + Tokens.space-xs;
+                        spacing: Tokens.space-sm;
+                        Label { text: "Redirect URI: " + Setup.redirect-uri; vertical-alignment: center; color: Tokens.text-primary; wrap: word-wrap; horizontal-stretch: 1; }
+                        Button { size: Tokens.control-sm; text: "Copy"; clicked => { Setup.copy-redirect(); } }
+                    }
+                    Step { number: "7."; text: "Under Which API/SDKs are you planning to use, tick Web API."; }
+                    Step { number: "8."; text: "Tick the box agreeing to Spotify's Developer Terms of Service and Design Guidelines, then click Save."; }
+                    Step { number: "9."; text: "Open your new app, go to Settings, and copy the Client ID."; }
+                    Step { number: "10."; text: "Paste it above and click Continue."; }
+                }
+                Label { text: "Cadence opens your browser twice, once for your library and once for streaming. Approve both. Each is one-time."; wrap: word-wrap; color: Tokens.text-secondary; }
+                if Setup.note != "" : Caption { text: Setup.note; wrap: word-wrap; color: Tokens.text-tertiary; }
+            }
+        }
+    }
+}
