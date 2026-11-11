@@ -12,6 +12,7 @@ mod clip;
 mod db;
 mod dialogs;
 mod dsp;
+mod http;
 mod library;
 mod local;
 mod log;
@@ -196,12 +197,27 @@ fn with_player(f: impl FnOnce(&Player)) {
     }
 }
 
+static START: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Milliseconds since the process started (launch timing in the log).
+pub fn since_start_ms() -> u128 {
+    START.get().map_or(0, |s| s.elapsed().as_millis())
+}
+
 static RT: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 /// The signed-in Web API client (absent without a client ID or before sign-in).
 static WEB: OnceLock<Arc<web::Web>> = OnceLock::new();
 
 pub fn web() -> Option<Arc<web::Web>> {
     WEB.get().cloned()
+}
+
+/// The launch sign-in is still running (there is a client ID and no answer yet). Pages show
+/// their cached content meanwhile instead of a "sign in" note.
+static WEB_PENDING: AtomicBool = AtomicBool::new(false);
+
+pub fn web_pending() -> bool {
+    WEB_PENDING.load(Ordering::Relaxed)
 }
 /// Cadence itself is playing (it has a track loaded and no other device took over).
 static LOCAL_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -410,6 +426,9 @@ async fn karaoke_for(uri: &str, title: &str, artist: &str, duration_ms: u32) -> 
     found
 }
 
+/// Logical size of the small now-playing cover: the largest slot that shows it (mini player).
+const SMALL_ART: f32 = 72.0;
+
 /// UI thread: show the new track and kick off its art and lyrics.
 #[allow(clippy::too_many_arguments)]
 fn apply_track(
@@ -444,12 +463,13 @@ fn apply_track(
         rt.spawn_blocking(move || {
             let px = (540.0 * scale) as u32;
             let img = local::artwork(&u).and_then(|d| art::decode_square(&d, px));
-            let small = img.as_ref().map(|i| art::decode_rescale(i, (56.0 * scale) as u32));
+            let small = img.as_ref().map(|i| art::decode_rescale(i, art::physical(SMALL_ART, scale)));
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 if TRACK_GEN.load(Ordering::Relaxed) != seq {
                     return;
                 }
                 let pb = ui.global::<Playback>();
+                pb.set_art_fresh(false);
                 if let Some(big) = img {
                     pb.set_side_art(slint::Image::from_rgba8(art::rounded(&big, 14.0 / 540.0)));
                     pb.set_bg_art(slint::Image::from_rgb8(art::blurred_bg(&big)));
@@ -494,21 +514,41 @@ fn apply_track(
         return;
     };
     let scale = ui.window().scale_factor();
-    // The lyrics page shows the art at up to 540 px; the bar at 56.
-    let (big_px, bar_px) = ((540.0 * scale).round() as u32, (56.0 * scale).round() as u32);
+    // Two sizes of the cover. The small one serves the bar and queue (56), the overlay (60) and
+    // the mini player (72), so it is decoded at the largest of those: no slot upscales it. The
+    // large one is for the lyrics page and the side panel (up to 540).
+    let (big_px, small_px) = (art::physical(540.0, scale), art::physical(SMALL_ART, scale));
     let weak = ui.as_weak();
     rt.spawn(async move {
-        let (big, small) = tokio::join!(art::load(&url, big_px), art::load(&url, bar_px));
+        // Small first: it decodes fastest, so the bar and mini player change at once.
+        let small = art::load_fresh(&url, small_px).await;
+        if let Some((a, fresh)) = small.clone() {
+            let thumb = tokio::task::spawn_blocking(move || (art::rounded(&a.buf, 10.0 / 44.0), a)).await;
+            if let Ok((thumb, a)) = thumb {
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    if TRACK_GEN.load(Ordering::Relaxed) != seq {
+                        return;
+                    }
+                    let pb = ui.global::<Playback>();
+                    // Downloaded just now: fade in. From a cache: appear at once.
+                    pb.set_art_fresh(fresh);
+                    pb.set_art(slint::Image::default());
+                    pb.set_bar_art(slint::Image::from_rgb8(a.buf));
+                    pb.set_thumb_art(slint::Image::from_rgba8(thumb));
+                    mini::sync(&ui);
+                });
+            }
+        }
+        let big = art::load_fresh(&url, big_px).await;
+        let source = big.clone().or(small).map(|(a, _)| a);
         // Derived images are made off the UI thread.
         let derived = tokio::task::spawn_blocking(move || {
-            let side = big.as_ref().map(|a| art::rounded(&a.buf, 14.0 / 540.0));
-            let bg = big.as_ref().or(small.as_ref()).map(|a| art::blurred_bg(&a.buf));
-            let thumb = small.as_ref().map(|a| art::rounded(&a.buf, 10.0 / 44.0));
-            let accent = big.as_ref().or(small.as_ref()).map(|a| a.accent);
-            (side, bg, thumb, small.map(|a| a.buf), accent)
+            let side = big.as_ref().map(|(a, _)| art::rounded(&a.buf, 14.0 / 540.0));
+            let bg = source.as_ref().map(|a| art::blurred_bg(&a.buf));
+            (side, bg, source.map(|a| a.accent))
         })
         .await;
-        let Ok((side, bg, thumb, small, accent)) = derived else { return };
+        let Ok((side, bg, accent)) = derived else { return };
         let _ = weak.upgrade_in_event_loop(move |ui| {
             if TRACK_GEN.load(Ordering::Relaxed) != seq {
                 return;
@@ -519,13 +559,8 @@ fn apply_track(
                 pb.set_accent(c);
                 ui.global::<Browse>().set_accent(c);
             }
-            let rgb = |b: Option<slint::SharedPixelBuffer<slint::Rgb8Pixel>>| b.map_or_else(slint::Image::default, slint::Image::from_rgb8);
-            let rgba = |b: Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>| b.map_or_else(slint::Image::default, slint::Image::from_rgba8);
-            pb.set_art(slint::Image::default());
-            pb.set_bar_art(rgb(small));
-            pb.set_bg_art(rgb(bg));
-            pb.set_side_art(rgba(side));
-            pb.set_thumb_art(rgba(thumb));
+            pb.set_bg_art(bg.map_or_else(slint::Image::default, slint::Image::from_rgb8));
+            pb.set_side_art(side.map_or_else(slint::Image::default, slint::Image::from_rgba8));
             mini::sync(&ui);
         });
     });
@@ -578,9 +613,13 @@ fn set_status(ui: &slint::Weak<MainWindow>, text: String) {
 /// Web API sign-in (then browse starts), streaming sign-in and playback events.
 /// Runs on the tokio runtime.
 async fn startup(ui: slint::Weak<MainWindow>) {
+    // Test runs: CADENCE_HOLD_SIGNIN=1 never signs in, so the window stays in the state every
+    // launch starts in (cached pages, sign-in pending) and that state can be measured.
+    if std::env::var("CADENCE_HOLD_SIGNIN").is_ok_and(|v| v == "1") {
+        return;
+    }
     let rt = tokio::runtime::Handle::current();
     let mut browse_started = false;
-    let _ = &rt;
     match auth::client_id() {
         Some(id) => {
             set_status(&ui, "Signing in to Spotify…".into());
@@ -602,14 +641,17 @@ async fn startup(ui: slint::Weak<MainWindow>) {
                             menu::toast_text(&ui, &format!("Your Spotify sign-in ends in {} days. Settings > Re-authorize renews it.", days.max(0)));
                         });
                     }
-                    let _ = ui.upgrade_in_event_loop(|ui| browse::init(&ui));
+                    WEB_PENDING.store(false, Ordering::Relaxed);
+                    let _ = ui.upgrade_in_event_loop(|_| browse::on_web_ready());
                     browse_started = true;
                 }
                 Err(e) => {
                     logln!("auth: Web API failed: {e}");
-                    let _ = ui.upgrade_in_event_loop(|ui| browse::init(&ui));
+                    WEB_PENDING.store(false, Ordering::Relaxed);
+                    let _ = ui.upgrade_in_event_loop(|_| {
+                        browse::on_web_unavailable("Couldn't sign in to Spotify. Settings > Re-authorize, or restart Cadence.")
+                    });
                     browse_started = true;
-                    set_status(&ui, "Couldn't sign in to Spotify. Settings > Re-authorize, or restart Cadence.".into());
                 }
             }
         }
@@ -617,9 +659,9 @@ async fn startup(ui: slint::Weak<MainWindow>) {
             eprintln!(
                 "auth: SPOTIFY_CLIENT_ID is missing (env var or %APPDATA%\\cadence\\client_id.txt); no Web API, streaming only"
             );
-            let _ = ui.upgrade_in_event_loop(|ui| browse::init(&ui));
+            WEB_PENDING.store(false, Ordering::Relaxed);
+            let _ = ui.upgrade_in_event_loop(|_| browse::on_web_unavailable("Add your Spotify client ID to load your library. See README."));
             browse_started = true;
-            set_status(&ui, "Add your Spotify client ID to load your library. See README.".into());
         }
     }
 
@@ -903,6 +945,8 @@ fn schedule_shots(ui: &MainWindow) {
 use slint::Model;
 
 fn main() -> Result<(), slint::PlatformError> {
+    let _ = START.set(std::time::Instant::now());
+    art::mark_ui_thread();
     taskbar::register_app_id();
     mem::start_logger();
     mem::start_guard();
@@ -1177,6 +1221,10 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         schedule_shots(&ui);
     } else {
+        // Cache first: the pages open from disk now; sign-in runs behind them and refreshes
+        // what is showing when it completes.
+        WEB_PENDING.store(auth::client_id().is_some(), Ordering::Relaxed);
+        browse::init(&ui);
         rt.spawn(startup(ui.as_weak()));
         // Test runs only: CADENCE_SHOTS with the real library (inactive window, nothing played).
         if flag("CADENCE_INACTIVE") {
@@ -1193,6 +1241,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let minimized = std::env::args().any(|a| a == "--minimized");
     if !(minimized && prefs::bool_or("close_to_tray", false)) {
         ui.show()?;
+        logln!("launch: window shown at +{} ms", since_start_ms());
         if minimized {
             ui.window().set_minimized(true);
         }

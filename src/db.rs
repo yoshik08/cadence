@@ -15,10 +15,24 @@ fn conn() -> MutexGuard<'static, Connection> {
             Connection::open_in_memory().expect("in-memory sqlite")
         });
         let _ = c.execute_batch(SCHEMA);
+        migrate(&c);
         Mutex::new(c)
     })
     .lock()
     .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Additive changes to databases made by earlier versions. Old rows keep working as they are.
+fn migrate(c: &Connection) {
+    // v1.5: a larger cover URL per library item (cards were upscaling the 64 px one). Existing
+    // rows get an empty value and fall back to the small URL; the sync marks are cleared so the
+    // next library sync, at this launch, refetches the lists and fills the column in.
+    if c.prepare("SELECT image_lg FROM library LIMIT 0").is_err() {
+        match c.execute_batch("ALTER TABLE library ADD COLUMN image_lg TEXT NOT NULL DEFAULT ''; DELETE FROM sync_state;") {
+            Ok(()) => crate::logln!("db: migrated library to v1.5 (image_lg)"),
+            Err(e) => crate::logln!("db: v1.5 migration failed: {e}"),
+        }
+    }
 }
 
 const SCHEMA: &str = "
@@ -75,11 +89,22 @@ pub struct LibItem {
     pub added_at: String,
     pub duration_ms: i64,
     pub explicit: bool,
+    /// Cover URL for row thumbnails (about 64 px).
     pub image: String,
+    /// Cover URL for cards and anything larger than a row thumbnail (about 300 px). Empty on
+    /// rows written before v1.5 until the next library sync; `art_url` falls back to `image`.
+    pub image_lg: String,
     pub owner_id: String,
     pub collaborative: bool,
     pub public: bool,
     pub total: i64,
+}
+
+impl LibItem {
+    /// The cover URL for a slot `px` physical pixels wide: the 64 px one only for row thumbnails.
+    pub fn art_url(&self, px: u32) -> &str {
+        if px > 64 && !self.image_lg.is_empty() { &self.image_lg } else { &self.image }
+    }
 }
 
 /// Replaces every row of `kind` with `items` (in order) in one transaction.
@@ -90,15 +115,15 @@ pub fn library_replace(kind: &str, items: &[LibItem]) {
     {
         let Ok(mut st) = tx.prepare(
             "INSERT OR REPLACE INTO library (uri, kind, title, subtitle, artist, artist_uri, album, album_uri, added_at,
-             duration_ms, explicit, image, owner_id, collaborative, public, total, position)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+             duration_ms, explicit, image, owner_id, collaborative, public, total, position, image_lg)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
         ) else {
             return;
         };
         for (i, it) in items.iter().enumerate() {
             let _ = st.execute(params![
                 it.uri, kind, it.title, it.subtitle, it.artist, it.artist_uri, it.album, it.album_uri, it.added_at,
-                it.duration_ms, it.explicit, it.image, it.owner_id, it.collaborative, it.public, it.total, i as i64
+                it.duration_ms, it.explicit, it.image, it.owner_id, it.collaborative, it.public, it.total, i as i64, it.image_lg
             ]);
         }
     }
@@ -113,10 +138,10 @@ pub fn library_set(kind: &str, item: Option<&LibItem>, uri: &str) {
         Some(it) => {
             let _ = c.execute(
                 "INSERT OR REPLACE INTO library (uri, kind, title, subtitle, artist, artist_uri, album, album_uri, added_at,
-                 duration_ms, explicit, image, owner_id, collaborative, public, total, position)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,-1)",
+                 duration_ms, explicit, image, owner_id, collaborative, public, total, position, image_lg)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,-1,?17)",
                 params![it.uri, kind, it.title, it.subtitle, it.artist, it.artist_uri, it.album, it.album_uri, it.added_at,
-                    it.duration_ms, it.explicit, it.image, it.owner_id, it.collaborative, it.public, it.total],
+                    it.duration_ms, it.explicit, it.image, it.owner_id, it.collaborative, it.public, it.total, it.image_lg],
             );
         }
         None => {
@@ -147,10 +172,11 @@ fn lib_row(r: &rusqlite::Row) -> rusqlite::Result<LibItem> {
         collaborative: r.get(13)?,
         public: r.get(14)?,
         total: r.get(15)?,
+        image_lg: r.get(16)?,
     })
 }
 
-const LIB_COLS: &str = "uri, kind, title, subtitle, artist, artist_uri, album, album_uri, added_at, duration_ms, explicit, image, owner_id, collaborative, public, total";
+const LIB_COLS: &str = "uri, kind, title, subtitle, artist, artist_uri, album, album_uri, added_at, duration_ms, explicit, image, owner_id, collaborative, public, total, image_lg";
 
 /// Rows of `kind`, filtered by `filter` (title/artist contains), ordered by `sort`
 /// ("recent" = library order, "alpha", "creator"), at most `limit`.

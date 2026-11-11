@@ -24,8 +24,7 @@ fn media_user_token() -> Option<String> {
 }
 
 fn client() -> &'static reqwest::Client {
-    static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    C.get_or_init(|| reqwest::Client::builder().timeout(Duration::from_secs(8)).build().unwrap_or_default())
+    crate::http::client()
 }
 
 /// The web player's developer token, scraped from its JS bundle (cached 12 h).

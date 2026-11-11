@@ -5,8 +5,8 @@
 //! Async results carry the PAGE value they started under and are dropped when it moved, so a
 //! slow response never lands on the wrong page. Page data is freed on navigation.
 
-use crate::api::{self, CardData, TrackData, arr, n, s};
-use crate::art::{self, SpImage};
+use crate::api::{self, CardData, Source, TrackData, arr, n, s};
+use crate::art::{self, Priority, SpImage};
 use crate::db;
 use crate::{Browse, Card, MainWindow, Playback, ShelfData, SideItem, StatRow, TrackRow};
 use reqwest::Method;
@@ -23,6 +23,8 @@ const UNAVAILABLE: &str = "Spotify doesn't share the track list of playlists you
 
 /// Bumped by every navigation.
 static PAGE: AtomicU64 = AtomicU64::new(0);
+/// `f32` bits of the window scale factor (1.0 until the window reports one).
+static SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
 /// Bumped by every search / find keystroke (debounce + stale results).
 static SEARCH: AtomicU64 = AtomicU64::new(0);
 static FIND: AtomicU64 = AtomicU64::new(0);
@@ -54,16 +56,26 @@ pub fn is_readable(playlist_uri: &str) -> bool {
 }
 
 pub async fn ensure_me() -> Result<(String, String), String> {
+    me_from(Source::Network).await
+}
+
+async fn me_from(src: Source) -> Result<(String, String), String> {
     if let Some(me) = lock(&ME).clone() {
         return Ok(me);
     }
-    let j = api::get("me", &[]).await.map_err(|e| e.to_string())?;
+    let j = api::get_from(src, "me", &[]).await.map_err(|e| e.to_string())?;
     if s(&j["id"]).is_empty() {
         return Err("Couldn't read your Spotify profile".into());
     }
     let me = (s(&j["id"]).to_string(), s(&j["display_name"]).to_string());
     *lock(&ME) = Some(me.clone());
     Ok(me)
+}
+
+/// No Spotify sign-in and none on its way. While the launch sign-in is still running, pages
+/// show what is cached instead of a "sign in" note.
+fn signed_out() -> bool {
+    crate::web().is_none() && !crate::web_pending()
 }
 
 pub fn my_id() -> Option<String> {
@@ -73,28 +85,128 @@ pub fn my_id() -> Option<String> {
 // ---------------------------------------------------------------------------------------------
 // Models (UI thread).
 
-/// A card list whose art loads the first time a row is shown (ListView only asks for visible rows).
+/// A card list for virtualized views (library rows, card grids). Art is requested when a row is
+/// first shown, a couple of screens ahead of the scroll position at lower priority, and dropped
+/// again for rows far from the viewport, so memory follows what is on screen, not the list length.
 struct LazyCards {
+    /// The card, the art URL chosen for its slot, and whether its art was already asked for.
     rows: RefCell<Vec<(Card, String, Cell<bool>)>>,
     notify: ModelNotify,
-    px: f32,
+    /// The slot width in logical pixels.
+    px: Cell<f32>,
+    me: std::rc::Weak<LazyCards>,
+    /// First row of the window last handled by `window` (scroll events repeat a lot).
+    seen_first: Cell<usize>,
 }
 
 impl LazyCards {
+    fn new(px: f32) -> Rc<LazyCards> {
+        Rc::new_cyclic(|me| LazyCards {
+            rows: RefCell::new(Vec::new()),
+            notify: ModelNotify::default(),
+            px: Cell::new(px),
+            me: me.clone(),
+            seen_first: Cell::new(usize::MAX),
+        })
+    }
+
     fn set(&self, rows: Vec<(Card, String)>) {
         *self.rows.borrow_mut() = rows.into_iter().map(|(c, u)| (c, u, Cell::new(false))).collect();
+        self.seen_first.set(usize::MAX);
         self.notify.reset();
     }
-    fn set_art(&self, i: usize, uri: &str, img: Image) {
+
+    fn len(&self) -> usize {
+        self.rows.borrow().len()
+    }
+
+    fn extend(&self, rows: impl IntoIterator<Item = (Card, String)>) {
+        let start = self.len();
+        self.rows.borrow_mut().extend(rows.into_iter().map(|(c, u)| (c, u, Cell::new(false))));
+        let added = self.len() - start;
+        if added > 0 {
+            self.notify.row_added(start, added);
+        }
+    }
+
+    fn set_art(&self, i: usize, uri: &str, img: Image, fresh: bool) {
         let hit = match self.rows.borrow_mut().get_mut(i) {
             Some(r) if r.0.uri.as_str() == uri => {
                 r.0.art = img;
+                r.0.fresh = fresh;
                 true
             }
             _ => false,
         };
         if hit {
             self.notify.row_changed(i);
+        }
+    }
+
+    /// The request for row `i` was dropped: let the row ask again when it is next shown.
+    fn forget(&self, i: usize, uri: &str) {
+        if let Some(r) = self.rows.borrow().get(i)
+            && r.0.uri.as_str() == uri
+        {
+            r.2.set(false);
+        }
+    }
+
+    /// Makes sure row `i` has its art or a request for it. Art already in memory is put on the
+    /// row right here, so a cached row never shows the placeholder.
+    fn want(&self, i: usize, priority: Priority) {
+        let px = art::physical(self.px.get(), scale());
+        let (uri, url) = {
+            let rows = self.rows.borrow();
+            let Some(r) = rows.get(i) else { return };
+            if r.2.replace(true) || r.1.is_empty() {
+                return;
+            }
+            (r.0.uri.to_string(), r.1.clone())
+        };
+        if let Some(a) = art::cached(&url, px) {
+            if let Some(r) = self.rows.borrow_mut().get_mut(i) {
+                r.0.art = Image::from_rgb8(a.buf);
+                r.0.fresh = false;
+            }
+            if priority == Priority::Prefetch {
+                self.notify.row_changed(i);
+            }
+            return;
+        }
+        let (me, g) = (SendWeak(self.me.clone()), PAGE.load(Relaxed));
+        art::request(url, px, priority, g, move |got| {
+            let _ = slint::invoke_from_event_loop(move || {
+                let me = me;
+                let Some(model) = me.0.upgrade() else { return };
+                if PAGE.load(Relaxed) != g {
+                    return;
+                }
+                match got {
+                    Some((a, fresh)) => model.set_art(i, &uri, Image::from_rgb8(a.buf), fresh),
+                    None => model.forget(i, &uri),
+                }
+            });
+        });
+    }
+
+    /// Rows `first..last` are on screen: prefetch the next two screens, and let go of the art of
+    /// rows more than a few screens away (it comes back from the memory or disk cache).
+    fn window(&self, first: usize, last: usize) {
+        if self.seen_first.replace(first) == first {
+            return;
+        }
+        let (len, screen) = (self.len(), last.saturating_sub(first).max(1));
+        for i in last..(last + 2 * screen).min(len) {
+            self.want(i, Priority::Prefetch);
+        }
+        let keep = first.saturating_sub(2 * screen)..(last + 3 * screen).min(len);
+        let mut rows = self.rows.borrow_mut();
+        for (i, r) in rows.iter_mut().enumerate() {
+            if !keep.contains(&i) && r.2.get() {
+                r.0.art = Image::default();
+                r.2.set(false);
+            }
         }
     }
 }
@@ -105,21 +217,8 @@ impl Model for LazyCards {
         self.rows.borrow().len()
     }
     fn row_data(&self, i: usize) -> Option<Card> {
-        let rows = self.rows.borrow();
-        let r = rows.get(i)?;
-        if !r.2.replace(true) && !r.1.is_empty() {
-            let (uri, url, g) = (r.0.uri.to_string(), r.1.clone(), PAGE.load(Relaxed));
-            let px = (self.px * scale()).round() as u32;
-            crate::runtime().spawn(async move {
-                let Some(a) = art::load(&url, px).await else { return };
-                let _ = slint::invoke_from_event_loop(move || {
-                    if PAGE.load(Relaxed) == g {
-                        with_models(|m| m.lib.set_art(i, &uri, Image::from_rgb8(a.buf)));
-                    }
-                });
-            });
-        }
-        Some(r.0.clone())
+        self.want(i, Priority::Visible);
+        self.rows.borrow().get(i).map(|r| r.0.clone())
     }
     fn model_tracker(&self) -> &dyn ModelTracker {
         &self.notify
@@ -136,8 +235,10 @@ struct Models {
     found_shelves: Rc<VecModel<ShelfData>>,
     found_cards: RefCell<Vec<Rc<VecModel<Card>>>>,
     tracks: Rc<VecModel<TrackRow>>,
-    list_cards: Rc<VecModel<Card>>,
+    list_cards: Rc<LazyCards>,
     lib: Rc<LazyCards>,
+    /// The art URL each home / search shelf card was loaded from (to tell a changed cover).
+    card_urls: RefCell<HashMap<String, String>>,
     side: Rc<VecModel<SideItem>>,
     popular: Rc<VecModel<TrackRow>>,
     disc: Rc<VecModel<Card>>,
@@ -167,6 +268,12 @@ struct PageData {
     artist_uri: String,
     total: usize,
     total_ms: u64,
+    /// Where the list is being read from, and, while a refresh runs behind rows already on
+    /// screen, the refreshed rows: they replace `rows` in one step when the refresh is complete,
+    /// so the list never shrinks or jumps while it reloads.
+    src: Option<Source>,
+    refreshing: bool,
+    fresh: Vec<TrackData>,
 }
 
 thread_local! {
@@ -192,8 +299,16 @@ fn weak() -> Weak<MainWindow> {
     UI.with(|u| u.borrow().clone().expect("browse::init not called"))
 }
 
+/// The window scale factor (UI thread). Also remembered for `scale_factor`.
 fn scale() -> f32 {
-    ui().map_or(1.0, |u| u.window().scale_factor())
+    let f = ui().map_or(1.0, |u| u.window().scale_factor());
+    SCALE.store(f.to_bits(), Relaxed);
+    f
+}
+
+/// The last scale factor seen on the UI thread, for code running elsewhere.
+fn scale_factor() -> f32 {
+    f32::from_bits(SCALE.load(Relaxed))
 }
 
 fn card(c: &CardData) -> Card {
@@ -231,21 +346,29 @@ fn row(t: &TrackData, index: usize) -> TrackRow {
     }
 }
 
-fn image_url(c: &CardData, px: u32) -> Option<String> {
-    art::pick_url(&c.images, px).or_else(|| (!c.art_url.is_empty()).then(|| c.art_url.clone()))
+fn image_url(c: &CardData, logical: f32) -> Option<String> {
+    art::pick_url(&c.images, logical, scale()).or_else(|| (!c.art_url.is_empty()).then(|| c.art_url.clone()))
 }
 
-/// Loads art for every card of `model` (small lists only: shelves, grids).
+/// Loads art for the cards of `model` that have none yet (shelves: a few dozen cards at most).
+/// Art in memory is set at once; the rest is requested and fades in when it arrives.
 fn load_cards_art(model: &Rc<VecModel<Card>>, cards: &[CardData], logical: f32, g: u64) {
-    let px = (logical * scale()).round() as u32;
-    for c in cards {
-        let Some(url) = image_url(c, px) else { continue };
+    let px = art::physical(logical, scale());
+    for (i, c) in cards.iter().enumerate() {
+        let Some(url) = image_url(c, logical) else { continue };
+        let Some(row) = model.row_data(i).filter(|r| r.uri.as_str() == c.uri) else { continue };
+        if row.art.size().width > 0 {
+            continue;
+        }
+        with_models(|m| m.card_urls.borrow_mut().insert(c.uri.clone(), url.clone()));
+        if let Some(a) = art::cached(&url, px) {
+            model.set_row_data(i, Card { art: Image::from_rgb8(a.buf), fresh: false, ..row });
+            continue;
+        }
         let uri = c.uri.clone();
-        let m = Rc::downgrade(model);
-        let m = SendWeak(m);
-        crate::runtime().spawn(async move {
-            let m = m;
-            let Some(a) = art::load(&url, px).await else { return };
+        let m = SendWeak(Rc::downgrade(model));
+        art::request(url, px, Priority::Visible, g, move |got| {
+            let Some((a, fresh)) = got else { return };
             let _ = slint::invoke_from_event_loop(move || {
                 let m = m;
                 if PAGE.load(Relaxed) != g {
@@ -255,6 +378,7 @@ fn load_cards_art(model: &Rc<VecModel<Card>>, cards: &[CardData], logical: f32, 
                 if let Some(i) = (0..model.row_count()).find(|&i| model.row_data(i).is_some_and(|r| r.uri.as_str() == uri)) {
                     let mut r = model.row_data(i).unwrap();
                     r.art = Image::from_rgb8(a.buf);
+                    r.fresh = fresh;
                     model.set_row_data(i, r);
                 }
             });
@@ -266,18 +390,51 @@ fn load_cards_art(model: &Rc<VecModel<Card>>, cards: &[CardData], logical: f32, 
 struct SendWeak<T>(std::rc::Weak<T>);
 unsafe impl<T> Send for SendWeak<T> {}
 
-fn art_into(images: &[SpImage], url: &str, logical: f32, g: u64, apply: impl FnOnce(&MainWindow, Image, (u8, u8, u8)) + Send + 'static) {
-    let px = (logical * scale()).round() as u32;
-    let Some(url) = art::pick_url(images, px).or_else(|| (!url.is_empty()).then(|| url.to_string())) else { return };
+/// Art for one slot (page header, top result). `apply` gets the image, its accent colour and
+/// whether it should fade in. In order of preference: the right size from memory (at once);
+/// else any smaller copy from memory right away, then the right size with a fade.
+fn art_into(images: &[SpImage], url: &str, logical: f32, g: u64, apply: impl Fn(&MainWindow, Image, (u8, u8, u8), bool) + Send + 'static) {
+    let px = art::physical(logical, scale());
+    let Some(url) = art::pick_url(images, logical, scale()).or_else(|| (!url.is_empty()).then(|| url.to_string())) else { return };
+    let Some(ui) = ui() else { return };
+    if let Some(a) = art::cached(&url, px) {
+        return apply(&ui, Image::from_rgb8(a.buf), a.accent, false);
+    }
+    if let Some(a) = art::cached_any(images) {
+        apply(&ui, Image::from_rgb8(a.buf), a.accent, false);
+    }
     let w = weak();
     crate::runtime().spawn(async move {
-        let Some(a) = art::load(&url, px).await else { return };
+        let Some((a, _)) = art::load_fresh(&url, px).await else { return };
         let _ = w.upgrade_in_event_loop(move |ui| {
             if PAGE.load(Relaxed) == g {
-                apply(&ui, Image::from_rgb8(a.buf), a.accent);
+                // Not in memory a moment ago, so it replaces a placeholder or a smaller copy.
+                apply(&ui, Image::from_rgb8(a.buf), a.accent, true);
             }
         });
     });
+}
+
+/// Sets the page header art (list and artist pages).
+fn set_list_art(ui: &MainWindow, img: Image, fresh: bool) {
+    let b = ui.global::<Browse>();
+    b.set_list_art_fresh(fresh);
+    b.set_list_art(img);
+}
+
+/// Card rows for `cards`, keeping the art `model` already shows for the same items.
+fn card_rows(model: &VecModel<Card>, cards: &[CardData]) -> Vec<Card> {
+    let old: HashMap<String, Image> = model.iter().filter(|c| c.art.size().width > 0).map(|c| (c.uri.to_string(), c.art)).collect();
+    cards
+        .iter()
+        .map(|c| {
+            let mut r = card(c);
+            if let Some(img) = old.get(&c.uri) {
+                r.art = img.clone();
+            }
+            r
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -312,11 +469,12 @@ fn finish(b: &Browse) {
 /// Starts a page: invalidates pending work, frees the previous page's models and data.
 fn new_page(ui: &MainWindow, page: &str, status: &str) -> u64 {
     let g = PAGE.fetch_add(1, Relaxed) + 1;
+    art::set_page(g);
     SEARCH.fetch_add(1, Relaxed);
     FIND.fetch_add(1, Relaxed);
     with_models(|m| {
         m.tracks.set_vec(Vec::new());
-        m.list_cards.set_vec(Vec::new());
+        m.list_cards.set(Vec::new());
         m.popular.set_vec(Vec::new());
         m.disc.set_vec(Vec::new());
         m.find_tracks.set_vec(Vec::new());
@@ -328,6 +486,7 @@ fn new_page(ui: &MainWindow, page: &str, status: &str) -> u64 {
         if page != "home" {
             m.shelves.set_vec(Vec::new());
             m.shelf_cards.borrow_mut().clear();
+            m.card_urls.borrow_mut().clear();
         }
     });
     data(|d| *d = PageData::default());
@@ -347,6 +506,7 @@ fn new_page(ui: &MainWindow, page: &str, status: &str) -> u64 {
     b.set_list_owner("".into());
     b.set_list_owner_uri("".into());
     b.set_list_note("".into());
+    b.set_list_art_fresh(false);
     b.set_list_art(Image::default());
     b.set_list_round(false);
     b.set_list_editable(false);
@@ -541,35 +701,98 @@ fn local_hour() -> u32 {
     unsafe { GetLocalTime().wHour as u32 }
 }
 
+/// Replaces the rows of `model` with `rows`, touching as little as possible: unchanged rows are
+/// left alone, a longer list with the same start is appended to, and only a real change resets
+/// the model. Views keep their scroll position and nothing flickers.
+fn patch_model<T: Clone + PartialEq + 'static>(model: &VecModel<T>, rows: Vec<T>) {
+    let old = model.row_count();
+    let same_start = (0..old.min(rows.len())).all(|i| model.row_data(i).as_ref() == Some(&rows[i]));
+    if rows.len() >= old && same_start {
+        model.extend(rows.into_iter().skip(old));
+    } else if rows.len() == old {
+        for (i, r) in rows.into_iter().enumerate() {
+            if model.row_data(i).as_ref() != Some(&r) {
+                model.set_row_data(i, r);
+            }
+        }
+    } else {
+        model.set_vec(rows);
+    }
+}
+
+/// The cards of one shelf, keeping the art of cards that are still there with the same cover.
+fn shelf_rows(old: &HashMap<String, Image>, cards: &[CardData], logical: f32) -> Vec<Card> {
+    cards
+        .iter()
+        .map(|c| {
+            let mut r = card(c);
+            let same_cover = with_models(|m| m.card_urls.borrow().get(&c.uri).cloned()) == image_url(c, logical);
+            if same_cover && let Some(img) = old.get(&c.uri) {
+                r.art = img.clone();
+            }
+            r
+        })
+        .collect()
+}
+
 fn set_shelves(ui: &MainWindow, filled: &HashMap<String, (Vec<CardData>, String, String)>, g: u64) {
-    let loading = filled.is_empty() && crate::web().is_some();
+    let loading = filled.is_empty() && !signed_out();
     // Once loaded, sections with nothing to show are left out (hidden ones stay listed for Customize).
     let layout: Vec<(String, bool)> = home_layout()
         .into_iter()
         .filter(|(k, hidden)| *hidden || loading || filled.get(k).is_some_and(|f| !f.0.is_empty() || !f.1.is_empty()))
         .collect();
+    let size = |key: &str| if key == "recent" { 140.0 } else { 160.0 };
+    // Art already on screen, by card: a refresh keeps it instead of loading it again.
+    let old: HashMap<String, Image> = with_models(|m| {
+        m.shelf_cards.borrow().iter().flat_map(|model| model.iter()).filter(|c| c.art.size().width > 0).map(|c| (c.uri.to_string(), c.art)).collect()
+    });
     let mut rows = Vec::new();
-    let mut cards_models = Vec::new();
+    let mut all_cards = Vec::new();
     for (key, hidden) in &layout {
         let title = HOME_SECTIONS.iter().find(|(k, _)| k == key).map_or("", |(_, t)| t);
         let (cards, note, more) = filled.get(key).cloned().unwrap_or_default();
-        let model = Rc::new(VecModel::from(cards.iter().map(card).collect::<Vec<_>>()));
-        load_cards_art(&model, &cards, if key == "recent" { 140.0 } else { 160.0 }, g);
-        rows.push(ShelfData {
-            key: key.as_str().into(),
-            title: title.into(),
-            round: key == "artists",
-            cards: model.clone().into(),
-            more: more.into(),
-            note: note.into(),
-            hidden: *hidden,
-        });
-        cards_models.push(model);
+        rows.push((key.clone(), title, *hidden, note, more));
+        all_cards.push(cards);
     }
-    with_models(|m| {
-        m.shelves.set_vec(rows);
-        *m.shelf_cards.borrow_mut() = cards_models;
+    // Same sections as now: patch each shelf in place. The page keeps its scroll position.
+    let same = with_models(|m| {
+        m.shelf_cards.borrow().len() == rows.len()
+            && m.shelves.row_count() == rows.len()
+            && m.shelves.iter().zip(&rows).all(|(cur, new)| {
+                cur.key.as_str() == new.0 && cur.hidden == new.2 && cur.note.as_str() == new.3 && cur.more.as_str() == new.4
+            })
     });
+    if same {
+        let models: Vec<Rc<VecModel<Card>>> = with_models(|m| m.shelf_cards.borrow().clone());
+        for ((model, cards), row) in models.iter().zip(&all_cards).zip(&rows) {
+            patch_model(model, shelf_rows(&old, cards, size(&row.0)));
+            load_cards_art(model, cards, size(&row.0), g);
+        }
+    } else {
+        let mut shelves = Vec::new();
+        let mut models = Vec::new();
+        for (row, cards) in rows.iter().zip(&all_cards) {
+            let model = Rc::new(VecModel::from(shelf_rows(&old, cards, size(&row.0))));
+            shelves.push(ShelfData {
+                key: row.0.as_str().into(),
+                title: row.1.into(),
+                round: row.0 == "artists",
+                cards: model.clone().into(),
+                more: row.4.as_str().into(),
+                note: row.3.as_str().into(),
+                hidden: row.2,
+            });
+            models.push(model);
+        }
+        with_models(|m| {
+            m.shelves.set_vec(shelves);
+            *m.shelf_cards.borrow_mut() = models.clone();
+        });
+        for ((model, cards), row) in models.iter().zip(&all_cards).zip(&rows) {
+            load_cards_art(model, cards, size(&row.0), g);
+        }
+    }
     let _ = ui;
 }
 
@@ -580,104 +803,144 @@ fn go_home(ui: &MainWindow) {
     b.set_greeting(greeting(lock(&ME).as_ref().map_or("", |m| m.1.as_str())).into());
     // Empty shelves with titles while loading.
     set_shelves(ui, &HashMap::new(), g);
-    if crate::web().is_none() {
+    if signed_out() {
         finish(&b);
         b.set_skeleton(false);
         b.set_status("Add your Spotify client ID and sign in to load your library (see README).".into());
         load_home_local(g);
         return;
     }
+    refresh_home(g, true);
+}
+
+struct HomeData {
+    name: String,
+    filled: HashMap<String, (Vec<CardData>, String, String)>,
+    error: Option<String>,
+}
+
+/// Home, cache first: the shelves are built from what is on disk (API cache + library index)
+/// and shown at once, then built again from the network and patched in place.
+fn refresh_home(g: u64, cached_first: bool) {
     let w = weak();
     crate::runtime().spawn(async move {
-        let me = ensure_me().await;
-        let name = me.as_ref().map(|m| m.1.clone()).unwrap_or_default();
-        let mut filled: HashMap<String, (Vec<CardData>, String, String)> = HashMap::new();
-        let layout = home_layout();
-        let want = |k: &str| layout.iter().any(|(x, h)| x == k && !h);
-        let mut error = None;
-
-        if want("recent") {
-            match api::get("me/player/recently-played", &[("limit", "50")]).await {
-                Ok(j) => {
-                    let mut seen = HashSet::new();
-                    let mut cards = Vec::new();
-                    for it in arr(&j["items"]) {
-                        // The context (playlist / album) if any, else the album.
-                        let ctx = s(&it["context"]["uri"]);
-                        let album = &it["track"]["album"];
-                        let key = if ctx.starts_with("spotify:album:") || ctx.is_empty() { s(&album["uri"]).to_string() } else { ctx.to_string() };
-                        if !seen.insert(key.clone()) {
-                            continue;
-                        }
-                        if key.starts_with("spotify:album:") {
-                            cards.extend(api::album_card(album));
-                        } else if let Some(t) = known_title(&key).or_else(|| db::library_get(&key).map(|l| l.title)) {
-                            let img = db::library_get(&key).map(|l| l.image).unwrap_or_default();
-                            cards.push(CardData { title: t, subtitle: "Playlist".into(), uri: key, art_url: img, kind: "playlist".into(), ..Default::default() });
-                        } else {
-                            cards.extend(api::album_card(album));
-                        }
-                        if cards.len() >= 20 {
-                            break;
-                        }
-                    }
-                    filled.insert("recent".into(), (cards, String::new(), String::new()));
-                }
-                Err(e) => error = Some(e.to_string()),
+        if cached_first {
+            let h = home_data(Source::Cache).await;
+            // Nothing on disk yet (first run): the skeleton stays until the network answers.
+            if h.filled.values().any(|f| !f.0.is_empty()) {
+                apply_home(&w, h, g, false);
             }
         }
-        // Library-backed sections come from the SQLite index (synced at launch).
-        let _ = crate::library::sync(false).await;
-        let lib = |kind: &str, n: usize| db::library_list(kind, "", "recent", n);
-        if want("playlists") {
-            let mut cards: Vec<CardData> = vec![CardData { title: "Liked Songs".into(), subtitle: format!("{} songs", db::library_count("track")), uri: "liked".into(), liked: true, kind: "collection".into(), ..Default::default() }];
-            cards.extend(lib("playlist", 20).into_iter().map(|l| CardData { title: l.title, subtitle: format!("Playlist · {}", l.subtitle), uri: l.uri, art_url: l.image, kind: "playlist".into(), ..Default::default() }));
-            filled.insert("playlists".into(), (cards, String::new(), "library".into()));
+        if crate::web().is_some() {
+            let h = home_data(Source::Network).await;
+            apply_home(&w, h, g, true);
         }
-        if want("liked") {
-            let cards: Vec<CardData> = lib("track", 16)
-                .into_iter()
-                .map(|l| CardData { title: l.title, subtitle: l.artist, uri: l.uri, art_url: l.image, kind: "track".into(), ..Default::default() })
-                .collect();
-            let note = if cards.is_empty() { "Songs you like show up here.".to_string() } else { String::new() };
-            filled.insert("liked".into(), (cards, note, "liked".into()));
-        }
-        if want("albums") {
-            let cards: Vec<CardData> = lib("album", 20).into_iter().map(|l| CardData { title: l.title, subtitle: l.subtitle, uri: l.uri, art_url: l.image, kind: "album".into(), ..Default::default() }).collect();
-            filled.insert("albums".into(), (cards, String::new(), "library".into()));
-        }
-        if want("shows") {
-            let cards: Vec<CardData> = lib("show", 20).into_iter().map(|l| CardData { title: l.title, subtitle: l.subtitle, uri: l.uri, art_url: l.image, kind: "show".into(), ..Default::default() }).collect();
-            if !cards.is_empty() {
-                filled.insert("shows".into(), (cards, String::new(), String::new()));
-            }
-        }
-        if want("releases") {
-            filled.insert("releases".into(), (new_releases().await, String::new(), String::new()));
-        }
-        if want("mostplayed") {
-            filled.insert("mostplayed".into(), most_played_cards().await);
-        }
-        let _ = w.upgrade_in_event_loop(move |ui| {
-            if PAGE.load(Relaxed) != g {
-                return;
-            }
-            let b = ui.global::<Browse>();
-            finish(&b);
-            b.set_skeleton(false);
-            b.set_greeting(greeting(&name).into());
-            // Background tint from the first recently played cover.
-            if let Some(first) = filled.get("recent").and_then(|f| f.0.first()) {
-                art_into(&first.images, &first.art_url, 64.0, g, |ui, _, (r, gr, bl)| {
-                    ui.global::<Browse>().set_home_tint(slint::Color::from_rgb_u8(r, gr, bl));
-                });
-            }
-            set_shelves(&ui, &filled, g);
-            if let Some(e) = error {
-                show_error(&b, &e);
-            }
-        });
     });
+}
+
+fn apply_home(w: &Weak<MainWindow>, h: HomeData, g: u64, done: bool) {
+    let _ = w.upgrade_in_event_loop(move |ui| {
+        if PAGE.load(Relaxed) != g {
+            return;
+        }
+        let b = ui.global::<Browse>();
+        if done {
+            finish(&b);
+        }
+        let cards: usize = h.filled.values().map(|f| f.0.len()).sum();
+        crate::logln!("launch: home {} at +{} ms ({cards} cards)", if done { "refreshed" } else { "shown from cache" }, crate::since_start_ms());
+        b.set_skeleton(false);
+        b.set_greeting(greeting(&h.name).into());
+        // Background tint from the first recently played cover.
+        if let Some(first) = h.filled.get("recent").and_then(|f| f.0.first()) {
+            art_into(&first.images, &first.art_url, 64.0, g, |ui, _, (r, gr, bl), _| {
+                ui.global::<Browse>().set_home_tint(slint::Color::from_rgb_u8(r, gr, bl));
+            });
+        }
+        set_shelves(&ui, &h.filled, g);
+        if done && let Some(e) = h.error {
+            show_error(&b, &e);
+        }
+    });
+}
+
+async fn home_data(src: Source) -> HomeData {
+    let me = me_from(src).await;
+    let name = me.as_ref().map(|m| m.1.clone()).unwrap_or_default();
+    let mut filled: HashMap<String, (Vec<CardData>, String, String)> = HashMap::new();
+    let layout = home_layout();
+    let want = |k: &str| layout.iter().any(|(x, h)| x == k && !h);
+    let mut error = None;
+    // Cards from the library index use the larger cover URL (the shelves are 140 / 160 px).
+    let lib_px = art::physical(160.0, scale_factor());
+
+    if want("recent") {
+        match api::get_from(src, "me/player/recently-played", &[("limit", "50")]).await {
+            Ok(j) => {
+                let mut seen = HashSet::new();
+                let mut cards = Vec::new();
+                for it in arr(&j["items"]) {
+                    // The context (playlist / album) if any, else the album.
+                    let ctx = s(&it["context"]["uri"]);
+                    let album = &it["track"]["album"];
+                    let key = if ctx.starts_with("spotify:album:") || ctx.is_empty() { s(&album["uri"]).to_string() } else { ctx.to_string() };
+                    if !seen.insert(key.clone()) {
+                        continue;
+                    }
+                    if key.starts_with("spotify:album:") {
+                        cards.extend(api::album_card(album));
+                    } else if let Some(t) = known_title(&key).or_else(|| db::library_get(&key).map(|l| l.title)) {
+                        let img = db::library_get(&key).map(|l| l.art_url(lib_px).to_string()).unwrap_or_default();
+                        cards.push(CardData { title: t, subtitle: "Playlist".into(), uri: key, art_url: img, kind: "playlist".into(), ..Default::default() });
+                    } else {
+                        cards.extend(api::album_card(album));
+                    }
+                    if cards.len() >= 20 {
+                        break;
+                    }
+                }
+                filled.insert("recent".into(), (cards, String::new(), String::new()));
+            }
+            Err(e) if src == Source::Network => error = Some(e.to_string()),
+            Err(_) => {}
+        }
+    }
+    // Library-backed sections come from the SQLite index (synced at launch).
+    if src == Source::Network {
+        let _ = crate::library::sync(false).await;
+    }
+    let lib = |kind: &str, n: usize| db::library_list(kind, "", "recent", n);
+    let img = |l: &db::LibItem| l.art_url(lib_px).to_string();
+    if want("playlists") {
+        let mut cards: Vec<CardData> = vec![CardData { title: "Liked Songs".into(), subtitle: format!("{} songs", db::library_count("track")), uri: "liked".into(), liked: true, kind: "collection".into(), ..Default::default() }];
+        cards.extend(lib("playlist", 20).into_iter().map(|l| CardData { art_url: img(&l), title: l.title, subtitle: format!("Playlist · {}", l.subtitle), uri: l.uri, kind: "playlist".into(), ..Default::default() }));
+        filled.insert("playlists".into(), (cards, String::new(), "library".into()));
+    }
+    if want("liked") {
+        let cards: Vec<CardData> = lib("track", 16)
+            .into_iter()
+            .map(|l| CardData { art_url: img(&l), title: l.title, subtitle: l.artist, uri: l.uri, kind: "track".into(), ..Default::default() })
+            .collect();
+        let note = if cards.is_empty() { "Songs you like show up here.".to_string() } else { String::new() };
+        filled.insert("liked".into(), (cards, note, "liked".into()));
+    }
+    if want("albums") {
+        let cards: Vec<CardData> = lib("album", 20).into_iter().map(|l| CardData { art_url: img(&l), title: l.title, subtitle: l.subtitle, uri: l.uri, kind: "album".into(), ..Default::default() }).collect();
+        filled.insert("albums".into(), (cards, String::new(), "library".into()));
+    }
+    if want("shows") {
+        let cards: Vec<CardData> = lib("show", 20).into_iter().map(|l| CardData { art_url: img(&l), title: l.title, subtitle: l.subtitle, uri: l.uri, kind: "show".into(), ..Default::default() }).collect();
+        if !cards.is_empty() {
+            filled.insert("shows".into(), (cards, String::new(), String::new()));
+        }
+    }
+    if want("releases") {
+        filled.insert("releases".into(), (new_releases(src).await, String::new(), String::new()));
+    }
+    if want("mostplayed") {
+        filled.insert("mostplayed".into(), most_played_cards().await);
+    }
+    HomeData { name, filled, error }
 }
 
 /// Home without Spotify sign-in: only Cadence's own data.
@@ -694,23 +957,27 @@ fn load_home_local(g: u64) {
     });
 }
 
-/// Releases from followed artists in the last 120 days, newest first (artist albums endpoint).
-async fn new_releases() -> Vec<CardData> {
+/// Releases from followed artists in the last 120 days, newest first (artist albums endpoint;
+/// Spotify has no batch form of it, so the requests run four at a time).
+async fn new_releases(src: Source) -> Vec<CardData> {
+    static LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
     let artists = db::library_list("artist", "", "recent", 25);
     let cutoff = days_ago_date(120);
-    let mut out = Vec::new();
+    let mut tasks = tokio::task::JoinSet::new();
     for a in artists {
-        let id = api::id_of(&a.uri).to_string();
-        let Ok(j) = api::get(&format!("artists/{id}/albums"), &[("include_groups", "album,single"), ("limit", "10")]).await else { continue };
-        for al in arr(&j["items"]) {
-            if s(&al["release_date"]) >= cutoff.as_str()
-                && let Some(c) = api::album_card(al)
-            {
-                out.push(c);
-            }
-        }
+        let cutoff = cutoff.clone();
+        tasks.spawn(async move {
+            let _permit = LIMIT.acquire().await.ok()?;
+            let id = api::id_of(&a.uri).to_string();
+            let j = api::get_from(src, &format!("artists/{id}/albums"), &[("include_groups", "album,single"), ("limit", "10")]).await.ok()?;
+            Some(arr(&j["items"]).iter().filter(|al| s(&al["release_date"]) >= cutoff.as_str()).filter_map(api::album_card).collect::<Vec<_>>())
+        });
     }
-    out.sort_by(|a, b| b.date.cmp(&a.date));
+    let mut out = Vec::new();
+    while let Some(done) = tasks.join_next().await {
+        out.extend(done.ok().flatten().unwrap_or_default());
+    }
+    out.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.uri.cmp(&b.uri)));
     let mut seen = HashSet::new();
     out.retain(|c| seen.insert(c.uri.clone()));
     out.truncate(20);
@@ -851,10 +1118,11 @@ fn apply_search(ui: &MainWindow, q: &str, j: &Value, g: u64) {
             };
             let sub = if c.kind == "artist" { kind } else { format!("{kind} · {}", c.subtitle) };
             b.set_top(Card { title: c.title.as_str().into(), subtitle: sub.into(), uri: c.uri.as_str().into(), round: c.round, ..Default::default() });
-            art_into(&c.images, &c.art_url, 96.0, g, |ui, img, _| {
+            art_into(&c.images, &c.art_url, 96.0, g, |ui, img, _, fresh| {
                 let b = ui.global::<Browse>();
                 let mut t = b.get_top();
                 t.art = img;
+                t.fresh = fresh;
                 b.set_top(t);
             });
         }
@@ -994,11 +1262,10 @@ fn load_more_search(g: u64) {
                     })
                     .collect();
                 let model = with_models(|m| m.list_cards.clone());
-                model.extend(cards.iter().map(card));
-                load_cards_art(&model, &cards, 160.0, g);
-                b.set_list_meta(format!("{} results", model.row_count()).into());
+                model.extend(cards.iter().map(|c| (card(c), image_url(c, 160.0).unwrap_or_default())));
+                b.set_list_meta(format!("{} results", model.len()).into());
             }
-            if data(|d| d.rows.is_empty()) && with_models(|m| m.list_cards.row_count()) == 0 {
+            if data(|d| d.rows.is_empty()) && with_models(|m| m.list_cards.len()) == 0 {
                 b.set_list_note("No results.".into());
             }
         });
@@ -1040,6 +1307,9 @@ fn fill_library(ui: &MainWindow) {
             rows.push((Card { title: name.into(), subtitle: format!("{count} playlists").into(), uri: format!("folder:{id}").into(), local: true, ..Default::default() }, String::new()));
         }
     }
+    // Rows show art at the thumbnail size (smaller in the compact layout).
+    let logical = if b.get_compact() { 36.0 } else { 56.0 };
+    let px = art::physical(logical, scale());
     let mut items = db::library_list(&tab, &filter, &sort, 5000);
     // Pinned first.
     items.sort_by_key(|i| pins.iter().position(|p| *p == i.uri).unwrap_or(usize::MAX));
@@ -1053,13 +1323,16 @@ fn fill_library(ui: &MainWindow) {
         };
         TITLES.lock().map(|mut t| t.insert(it.uri.clone(), it.title.clone())).ok();
         rows.push((
-            Card { title: it.title.into(), subtitle: sub.into(), uri: it.uri.as_str().into(), round: tab == "artist", pinned: pins.contains(&it.uri), ..Default::default() },
-            it.image,
+            Card { title: it.title.as_str().into(), subtitle: sub.into(), uri: it.uri.as_str().into(), round: tab == "artist", pinned: pins.contains(&it.uri), ..Default::default() },
+            it.art_url(px).to_string(),
         ));
     }
     let empty = rows.is_empty();
-    with_models(|m| m.lib.set(rows));
-    b.set_lib_note(if crate::web().is_none() {
+    with_models(|m| {
+        m.lib.px.set(logical);
+        m.lib.set(rows);
+    });
+    b.set_lib_note(if signed_out() {
         "Sign in to Spotify to see your library.".into()
     } else if empty {
         if filter.is_empty() { "Nothing here yet.".into() } else { format!("Nothing matches \u{201c}{filter}\u{201d}.").into() }
@@ -1193,20 +1466,43 @@ fn open_list(ui: &MainWindow, uri: &str) {
         open_liked(ui, g);
         return;
     }
-    if crate::web().is_none() {
+    if signed_out() {
         finish(&b);
         b.set_list_note("Sign in to Spotify to see this.".into());
         return;
+    }
+    // Playlists and albums open from the disk cache, then refresh in place. Podcasts read through
+    // the cache as before (their episode rows carry local progress and are built differently).
+    fetch_list(g, kind, uri, if kind == "show" { Source::Network } else { Source::Cache });
+}
+
+/// Loads a playlist, album or podcast page from `src` (header, then its rows page by page).
+fn fetch_list(g: u64, kind: &'static str, uri: String, src: Source) {
+    let Some(ui) = ui() else { return };
+    let b = ui.global::<Browse>();
+    if src == Source::Network && crate::web().is_none() {
+        // Still signing in: the cached page stays; `on_web_ready` reloads it.
+        return finish(&b);
+    }
+    data(|d| {
+        d.src = Some(src);
+        d.refreshing = src == Source::Network && !d.rows.is_empty();
+        d.fresh.clear();
+        d.more = None;
+    });
+    if src == Source::Network && !data(|d| d.refreshing) {
+        b.set_loading(true);
     }
     let id = api::id_of(&uri).to_string();
     let w = weak();
     let uri2 = uri.clone();
     crate::runtime().spawn(async move {
         let (head, me) = tokio::join!(
-            async { let path = format!("{}s/{id}", kind); api::get(&path, &[]).await },
-            async { if kind == "playlist" { ensure_me().await.ok() } else { None } }
+            async { let path = format!("{}s/{id}", kind); api::get_from(src, &path, &[]).await },
+            async { if kind == "playlist" { me_from(src).await.ok() } else { None } }
         );
-        let saved = api::contains(std::slice::from_ref(&uri2)).await.ok().and_then(|v| v.first().copied());
+        // Saved state is live data: only asked for on the network pass.
+        let saved = if src == Source::Network { api::contains(std::slice::from_ref(&uri2)).await.ok().and_then(|v| v.first().copied()) } else { None };
         let _ = w.upgrade_in_event_loop(move |ui| {
             if PAGE.load(Relaxed) != g {
                 return;
@@ -1214,8 +1510,13 @@ fn open_list(ui: &MainWindow, uri: &str) {
             let b = ui.global::<Browse>();
             let head = match head {
                 Ok(h) => h,
+                Err(_) if src == Source::Cache => return fetch_list(g, kind, uri2, Source::Network),
                 Err(e) => {
                     finish(&b);
+                    if data(|d| d.refreshing) {
+                        data(|d| d.refreshing = false);
+                        return crate::logln!("browse: refresh failed: {e}");
+                    }
                     return show_error(&b, &e.to_string());
                 }
             };
@@ -1236,8 +1537,10 @@ fn open_list(ui: &MainWindow, uri: &str) {
                         data(|d| d.more = Some((format!("albums/{id}/tracks"), items.len(), "album")));
                         load_more(g, true);
                     } else {
-                        finish(&b);
-                        load_hearts(g);
+                        if !data(|d| d.refreshing) {
+                            list_meta(&b, kind, false);
+                        }
+                        list_done(&ui, g, kind);
                     }
                 }
                 _ => {
@@ -1257,8 +1560,10 @@ fn apply_head(ui: &MainWindow, kind: &str, uri: &str, h: &Value, me: Option<Stri
     b.set_list_title(title.as_str().into());
     let desc = api::plain(s(&h["description"]));
     b.set_list_desc(desc.as_str().into());
-    b.set_list_saved(saved.unwrap_or(false));
-    b.set_list_can_save(saved.is_some());
+    if saved.is_some() || data(|d| d.src) != Some(Source::Network) {
+        b.set_list_saved(saved.unwrap_or(false));
+        b.set_list_can_save(saved.is_some());
+    }
     match kind {
         "playlist" => {
             let owner_id = s(&h["owner"]["id"]).to_string();
@@ -1272,7 +1577,9 @@ fn apply_head(ui: &MainWindow, kind: &str, uri: &str, h: &Value, me: Option<Stri
             b.set_list_editable(owned || collab);
             // Owned playlists can't be "saved"; the heart is for others' playlists.
             b.set_list_can_save(!owned && saved.is_some());
-            b.set_list_meta(format!("{} songs", total).into());
+            if !data(|d| d.refreshing) {
+                b.set_list_meta(format!("{} songs", total).into());
+            }
             data(|d| {
                 d.owner_id = owner_id;
                 d.collaborative = collab;
@@ -1289,7 +1596,9 @@ fn apply_head(ui: &MainWindow, kind: &str, uri: &str, h: &Value, me: Option<Stri
             b.set_list_owner(artist.as_str().into());
             b.set_list_owner_uri(s(&h["artists"][0]["uri"]).into());
             let date = s(&h["release_date"]);
-            b.set_list_meta(format!("{} · {} songs", date, total).into());
+            if !data(|d| d.refreshing) {
+                b.set_list_meta(format!("{} · {} songs", date, total).into());
+            }
             data(|d| {
                 d.title = title.clone();
                 d.total = total as usize;
@@ -1306,7 +1615,7 @@ fn apply_head(ui: &MainWindow, kind: &str, uri: &str, h: &Value, me: Option<Stri
         _ => {}
     }
     let imgs = api::images(&h["images"]);
-    art_into(&imgs, "", 176.0, g, |ui, img, _| ui.global::<Browse>().set_list_art(img));
+    art_into(&imgs, "", 176.0, g, |ui, img, _, fresh| set_list_art(ui, img, fresh));
 }
 
 fn hide_explicit(t: &TrackData) -> bool {
@@ -1315,11 +1624,55 @@ fn hide_explicit(t: &TrackData) -> bool {
 
 /// Adds rows in original order, then rebuilds the display order (sort / filter).
 fn append_tracks(ui: &MainWindow, rows: Vec<TrackData>) {
+    // A refresh behind rows already on screen collects quietly (see `list_done`).
+    if data(|d| d.refreshing) {
+        return data(|d| d.fresh.extend(rows));
+    }
     data(|d| {
         d.total_ms += rows.iter().map(|r| r.duration_ms).sum::<u64>();
         d.rows.extend(rows);
     });
     apply_order(ui, false);
+}
+
+/// "N songs, about 1 hr" under the title of a playlist, album or Liked Songs.
+fn list_meta(b: &Browse, kind: &str, loading: bool) {
+    let (n_rows, ms, total) = data(|d| (d.rows.len(), d.total_ms, d.total));
+    let size = if total > n_rows && loading { format!("{n_rows} of {total} songs") } else { format!("{n_rows} songs") };
+    let meta = if kind == "album" {
+        let base = b.get_list_meta().to_string();
+        let date = base.split(" · ").next().unwrap_or("").to_string();
+        format!("{date} · {size}, {}", api::long_duration(ms))
+    } else {
+        format!("{size}, about {}", api::long_duration(ms))
+    };
+    b.set_list_meta(meta.into());
+}
+
+/// A playlist or album finished loading from its current source.
+/// - From the cache: the page is already showing; now refresh it from the network.
+/// - A refresh: swap the refreshed rows in. Unchanged rows are not touched, so the list stays
+///   where it is; only real differences redraw.
+fn list_done(ui: &MainWindow, g: u64, kind: &'static str) {
+    let b = ui.global::<Browse>();
+    if data(|d| d.src) == Some(Source::Cache) {
+        let uri = b.get_list_uri().to_string();
+        return fetch_list(g, kind, uri, Source::Network);
+    }
+    if data(|d| d.refreshing) {
+        data(|d| {
+            d.rows = std::mem::take(&mut d.fresh);
+            d.total_ms = d.rows.iter().map(|r| r.duration_ms).sum();
+            d.refreshing = false;
+        });
+        apply_order(ui, false);
+        list_meta(&b, kind, false);
+    }
+    finish(&b);
+    if kind == "playlist" && data(|d| d.rows.is_empty()) {
+        b.set_list_note(if b.get_list_editable() { "This playlist is empty. Use Add songs to find something.".into() } else { UNAVAILABLE.into() });
+    }
+    load_hearts(g);
 }
 
 /// Display order: sort key (remembered per playlist) and the explicit filter.
@@ -1360,7 +1713,7 @@ fn apply_order(ui: &MainWindow, reset_hearts: bool) {
             })
             .collect::<Vec<_>>()
     });
-    with_models(|m| m.tracks.set_vec(rows));
+    with_models(|m| patch_model(&m.tracks, rows));
 }
 
 /// Fetches the next page of the current list. `auto` keeps going until done (playlists and
@@ -1371,6 +1724,7 @@ fn load_more(g: u64, auto: bool) {
         return load_more_search(g);
     }
     let w = weak();
+    let src = data(|d| d.src).unwrap_or(Source::Network);
     crate::runtime().spawn(async move {
         let off = offset.to_string();
         let limit = if kind == "artist" { "10" } else { "50" };
@@ -1378,7 +1732,7 @@ fn load_more(g: u64, auto: bool) {
         if kind == "artist" {
             q.push(("include_groups", "album,single,compilation"));
         }
-        let res = api::get(&path, &q).await;
+        let res = api::get_from(src, &path, &q).await;
         let _ = w.upgrade_in_event_loop(move |ui| {
             if PAGE.load(Relaxed) != g {
                 return;
@@ -1386,7 +1740,19 @@ fn load_more(g: u64, auto: bool) {
             let b = ui.global::<Browse>();
             let j = match res {
                 Ok(j) => j,
+                // The cache ran out part-way: the network pass takes over from the start.
+                Err(_) if src == Source::Cache => return list_done(&ui, g, kind),
                 Err(e) => {
+                    // A failed refresh leaves the cached rows on screen.
+                    if data(|d| d.refreshing) {
+                        data(|d| {
+                            d.refreshing = false;
+                            d.fresh.clear();
+                            d.more = None;
+                        });
+                        finish(&b);
+                        return crate::logln!("browse: refresh failed: {e}");
+                    }
                     finish(&b);
                     data(|d| d.more = None);
                     b.set_list_more(false);
@@ -1403,7 +1769,11 @@ fn load_more(g: u64, auto: bool) {
             match kind {
                 "playlist" => {
                     if offset == 0 && !items.is_empty() {
-                        lock(&READABLE).insert(b.get_list_uri().to_string());
+                        let mut readable = lock(&READABLE);
+                        if readable.len() > 2000 {
+                            readable.clear();
+                        }
+                        readable.insert(b.get_list_uri().to_string());
                     }
                     append_tracks(&ui, items.iter().map(|x| {
                         let mut t = api::track(api::present(&x["item"], &x["track"]));
@@ -1438,30 +1808,20 @@ fn load_more(g: u64, auto: bool) {
             }
             data(|d| d.more = next.then(|| (path.clone(), new_offset, kind)));
             let auto_next = next && auto && (kind == "playlist" || (kind == "album") || (kind == "artist" && new_offset < 30));
+            let quiet = data(|d| d.refreshing);
             b.set_list_more(next && !auto_next);
-            if kind == "playlist" || kind == "album" || kind == "liked" {
-                let (n_rows, ms, total) = data(|d| (d.rows.len(), d.total_ms, d.total));
-                let size = if total > n_rows && auto_next { format!("{n_rows} of {total} songs") } else { format!("{n_rows} songs") };
-                let meta = if kind == "album" {
-                    let base = b.get_list_meta().to_string();
-                    let date = base.split(" · ").next().unwrap_or("").to_string();
-                    format!("{date} · {size}, {}", api::long_duration(ms))
-                } else {
-                    format!("{size}, about {}", api::long_duration(ms))
-                };
-                b.set_list_meta(meta.into());
+            if !quiet && (kind == "playlist" || kind == "album") {
+                list_meta(&b, kind, auto_next);
             }
             if auto_next {
-                b.set_status(format!("Loaded {new_offset}…").into());
+                if !quiet && src == Source::Network {
+                    b.set_status(format!("Loaded {new_offset}…").into());
+                }
                 load_more(g, true);
+            } else if kind == "playlist" || kind == "album" {
+                list_done(&ui, g, kind);
             } else {
                 finish(&b);
-                if kind == "playlist" && data(|d| d.rows.is_empty()) && offset == 0 {
-                    b.set_list_note(if b.get_list_editable() { "This playlist is empty. Use Add songs to find something.".into() } else { UNAVAILABLE.into() });
-                }
-                if kind != "show" && kind != "artist" {
-                    load_hearts(g);
-                }
             }
         });
     });
@@ -1548,8 +1908,12 @@ fn open_liked(ui: &MainWindow, g: u64) {
     if let Some((id, _)) = lock(&ME).clone() {
         b.set_list_uri(format!("spotify:user:{id}:collection").into());
     }
-    if crate::web().is_none() {
+    if signed_out() {
         b.set_list_note("Sign in to Spotify to see your liked songs.".into());
+        return;
+    }
+    if crate::web().is_none() {
+        // Still signing in: the rows from disk are showing; `on_web_ready` refreshes them.
         return;
     }
     // Refresh from Spotify in the background when stale or empty.
@@ -1623,7 +1987,7 @@ fn open_local(ui: &MainWindow) {
 
 fn open_folder(ui: &MainWindow, route: &str) {
     let Some(id) = route.strip_prefix("folder:").and_then(|x| x.parse::<i64>().ok()) else { return };
-    let g = new_page(ui, "list", "");
+    new_page(ui, "list", "");
     let b = ui.global::<Browse>();
     let name = db::folders().into_iter().find(|f| f.0 == id).map(|f| f.1).unwrap_or_default();
     b.set_list_kind("folder".into());
@@ -1636,15 +2000,13 @@ fn open_folder(ui: &MainWindow, route: &str) {
     let cards: Vec<CardData> = filed
         .iter()
         .filter_map(|u| db::library_get(u))
-        .map(|l| CardData { title: l.title, subtitle: format!("Playlist · {}", l.subtitle), uri: l.uri, art_url: l.image, kind: "playlist".into(), ..Default::default() })
+        .map(|l| CardData { art_url: l.art_url(art::physical(160.0, scale())).to_string(), title: l.title, subtitle: format!("Playlist · {}", l.subtitle), uri: l.uri, kind: "playlist".into(), ..Default::default() })
         .collect();
     b.set_list_meta(format!("{} playlists", cards.len()).into());
     if cards.is_empty() {
         b.set_list_note("Empty. Right-click a playlist and choose Move to folder.".into());
     }
-    let model = with_models(|m| m.list_cards.clone());
-    model.set_vec(cards.iter().map(card).collect::<Vec<_>>());
-    load_cards_art(&model, &cards, 160.0, g);
+    with_models(|m| m.list_cards.set(cards.iter().map(|c| (card(c), image_url(c, 160.0).unwrap_or_default())).collect()));
 }
 
 fn open_artist_liked(ui: &MainWindow, artist_uri: &str) {
@@ -1700,7 +2062,7 @@ fn open_artist(ui: &MainWindow, uri: &str) {
                     let name = s(&h["name"]).to_string();
                     TITLES.lock().map(|mut t| t.insert(uri.clone(), name.clone())).ok();
                     b.set_list_title(name.into());
-                    art_into(&api::images(&h["images"]), "", 216.0, g, |ui, img, _| ui.global::<Browse>().set_list_art(img));
+                    art_into(&api::images(&h["images"]), "", 216.0, g, |ui, img, _, fresh| set_list_art(ui, img, fresh));
                 }
                 Err(e) => {
                     // No Web API: name and photo from librespot's artist metadata.
@@ -1714,7 +2076,7 @@ fn open_artist(ui: &MainWindow, uri: &str) {
                         let _ = w.upgrade_in_event_loop(move |ui| {
                             if PAGE.load(Relaxed) == g {
                                 ui.global::<Browse>().set_list_title(name.into());
-                                art_into(&[], &img, 216.0, g, |ui, i, _| ui.global::<Browse>().set_list_art(i));
+                                art_into(&[], &img, 216.0, g, |ui, i, _, fresh| set_list_art(ui, i, fresh));
                             }
                         });
                     });
@@ -1802,8 +2164,9 @@ fn apply_disc(ui: &MainWindow, g: u64) {
     let b = ui.global::<Browse>();
     let f = b.get_disc_filter().to_string();
     let cards: Vec<CardData> = data(|d| d.disc_all.iter().filter(|c| f == "all" || c.album_type == f).cloned().collect());
+    // Load more appends; a filter change replaces. Either way cards already shown keep their art.
     let model = with_models(|m| m.disc.clone());
-    model.set_vec(cards.iter().map(card).collect::<Vec<_>>());
+    patch_model(&model, card_rows(&model, &cards));
     load_cards_art(&model, &cards, 160.0, g);
 }
 
@@ -2296,8 +2659,9 @@ pub fn init(ui: &MainWindow) {
         found_shelves: Rc::new(VecModel::default()),
         found_cards: RefCell::new(Vec::new()),
         tracks: Rc::new(VecModel::default()),
-        list_cards: Rc::new(VecModel::default()),
-        lib: Rc::new(LazyCards { rows: RefCell::new(Vec::new()), notify: ModelNotify::default(), px: 52.0 }),
+        list_cards: LazyCards::new(160.0),
+        lib: LazyCards::new(56.0),
+        card_urls: RefCell::new(HashMap::new()),
         side: Rc::new(VecModel::default()),
         popular: Rc::new(VecModel::default()),
         disc: Rc::new(VecModel::default()),
@@ -2324,6 +2688,12 @@ pub fn init(ui: &MainWindow) {
     b.set_lib_tab(crate::prefs::get("lib_tab").as_str().unwrap_or("playlist").into());
     b.set_lib_sort(crate::prefs::get("lib_sort").as_str().unwrap_or("recent").into());
 
+    let w = ui.as_weak();
+    b.on_scrolled(move || {
+        if let Some(ui) = w.upgrade() {
+            on_scrolled(&ui);
+        }
+    });
     b.on_open(|uri| go(&uri));
     b.on_go(|route| go(&route));
     b.on_back(back);
@@ -2541,20 +2911,61 @@ pub fn init(ui: &MainWindow) {
     go_home(ui);
     update_nav(&b);
 
-    // Library index: sync in the background, then refresh the sidebar (and Home's shelves).
-    if crate::web().is_some() {
-        let w = ui.as_weak();
-        crate::runtime().spawn(async move {
-            let changed = crate::library::sync(false).await;
-            if !changed.is_empty() {
-                let _ = w.upgrade_in_event_loop(|ui| {
-                    fill_sidebar(&ui);
-                    if ui.global::<Browse>().get_page() == "library" {
-                        fill_library(&ui);
-                    }
-                });
-            }
-        });
+}
+
+/// The page scrolled (or resized): tell the virtualized card lists which rows are on screen.
+fn on_scrolled(ui: &MainWindow) {
+    let b = ui.global::<Browse>();
+    let (y, h) = ((-b.get_scroll_y()).max(0.0), b.get_view_height().max(1.0));
+    match b.get_page().as_str() {
+        "library" => {
+            let row = if b.get_compact() { 48.0 } else { 68.0 };
+            let first = (y / row) as usize;
+            with_models(|m| m.lib.window(first, first + (h / row).ceil() as usize));
+        }
+        "list" if with_models(|m| m.list_cards.len()) > 0 => {
+            // The card grid: 176 px cells, 220 px rows, 32 px page margins (ui/browse.slint CardGrid).
+            let width = ui.window().size().width as f32 / scale() - 232.0;
+            let cols = (((width - 64.0 + 16.0) / 176.0).floor() as usize).max(1);
+            let first = (y / 220.0) as usize * cols;
+            with_models(|m| m.list_cards.window(first, first + (h / 220.0).ceil() as usize * cols));
+        }
+        _ => {}
+    }
+}
+
+/// The launch sign-in finished: refresh what the cache-first start is showing, in place.
+pub fn on_web_ready() {
+    let Some(ui) = ui() else { return };
+    let b = ui.global::<Browse>();
+    if b.get_status().as_str().starts_with("Signing in") {
+        b.set_status("".into());
+    }
+    match b.get_page().as_str() {
+        "home" => refresh_home(PAGE.load(Relaxed), false),
+        "settings" | "stats" | "profile" => {}
+        _ => reload(),
+    }
+    // Library index: sync in the background, then refresh the sidebar and the library page.
+    let w = ui.as_weak();
+    crate::runtime().spawn(async move {
+        let changed = crate::library::sync(false).await;
+        if !changed.is_empty() {
+            let _ = w.upgrade_in_event_loop(|ui| {
+                fill_sidebar(&ui);
+                if ui.global::<Browse>().get_page() == "library" {
+                    fill_library(&ui);
+                }
+            });
+        }
+    });
+}
+
+/// The launch sign-in failed or there is no client ID: show the signed-out state.
+pub fn on_web_unavailable(status: &str) {
+    reload();
+    if let Some(ui) = ui() {
+        ui.global::<Browse>().set_status(status.into());
     }
 }
 

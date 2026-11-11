@@ -44,6 +44,7 @@ fn create(ui: &MainWindow) -> Option<(MiniWindow, slint::Timer)> {
             save_position(&m);
             let _ = m.hide();
         }
+        stop_timer();
     });
     let w = mini.as_weak();
     mini.on_expand(move || {
@@ -51,6 +52,7 @@ fn create(ui: &MainWindow) -> Option<(MiniWindow, slint::Timer)> {
             save_position(&m);
             let _ = m.hide();
         }
+        stop_timer();
         crate::show_main();
     });
     let x = crate::prefs::get("mini_x").as_i64();
@@ -59,19 +61,35 @@ fn create(ui: &MainWindow) -> Option<(MiniWindow, slint::Timer)> {
         mini.window().set_position(slint::PhysicalPosition::new(x as i32, y as i32));
     }
     sync_all(&mini, ui);
-    let timer = slint::Timer::default();
-    let w = mini.as_weak();
+    // Started when the mini player is shown, stopped when it is hidden (see `run_timer`).
+    Some((mini, slint::Timer::default()))
+}
+
+/// The seek bar follows playback only while the mini player is showing; hidden, nothing ticks.
+fn run_timer(m: &MiniWindow, timer: &slint::Timer, on: bool) {
+    if !on {
+        return timer.stop();
+    }
+    let w = m.as_weak();
     timer.start(slint::TimerMode::Repeated, Duration::from_millis(500), move || {
-        if let (Some(m), Some(ui)) = (w.upgrade(), main_ui())
-            && m.window().is_visible()
-        {
+        if let (Some(m), Some(ui)) = (w.upgrade(), main_ui()) {
             let pb = ui.global::<Playback>();
             m.set_position_ms(pb.get_position_ms());
             m.set_duration_ms(pb.get_duration_ms());
             m.set_playing(pb.get_playing());
         }
     });
-    Some((mini, timer))
+}
+
+/// The mini player was hidden from one of its own buttons.
+fn stop_timer() {
+    MINI.with(|c| {
+        if let Ok(c) = c.try_borrow()
+            && let Some((_, timer)) = c.as_ref()
+        {
+            timer.stop();
+        }
+    });
 }
 
 fn save_position(m: &MiniWindow) {
@@ -84,6 +102,7 @@ fn sync_all(m: &MiniWindow, ui: &MainWindow) {
     let pb = ui.global::<Playback>();
     m.set_track_title(pb.get_title());
     m.set_artist(pb.get_artist());
+    m.set_art_fresh(pb.get_art_fresh());
     m.set_art(pb.get_bar_art());
     m.set_playing(pb.get_playing());
     m.set_volume(pb.get_volume());
@@ -98,13 +117,15 @@ pub fn toggle(ui: &MainWindow) {
         if c.is_none() {
             *c = create(ui);
         }
-        if let Some((m, _)) = c.as_ref() {
+        if let Some((m, timer)) = c.as_ref() {
             if m.window().is_visible() {
                 save_position(m);
                 let _ = m.hide();
+                run_timer(m, timer, false);
             } else {
                 sync_all(m, ui);
                 let _ = m.show();
+                run_timer(m, timer, true);
             }
         }
     });

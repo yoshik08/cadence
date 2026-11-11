@@ -1,10 +1,20 @@
 #![allow(dead_code)]
-//! Album art: fetch, DCT-downscaled JPEG decode, square crop, accent colour, small LRU.
+//! Art pipeline: cover art, artist photos, playlist images, album art.
+//!
+//! - `pick_image` chooses which Spotify image to download for a slot.
+//! - Decoding and resizing run on blocking worker threads and produce a `SharedPixelBuffer`;
+//!   the `slint::Image` is made from it on the UI thread (Image is not Send).
+//! - Memory cache: LRU keyed by (url, pixel size) with a byte budget.
+//! - Disk cache: downloaded bodies under `cache\art`, so a repeat view never hits the network.
+//! - `request` is the list path: visible rows first (newest request first), prefetch after,
+//!   bounded parallel downloads, and requests for a page that was left are dropped.
+//! - `load` is the direct path for single images (now playing, page headers).
 
 use slint::{Rgb8Pixel, SharedPixelBuffer};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
-use tokio::sync::{OnceCell, Semaphore};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex, MutexGuard};
+use tokio::sync::{Notify, OnceCell, Semaphore};
 
 #[derive(Clone)]
 pub struct Art {
@@ -12,113 +22,316 @@ pub struct Art {
     pub accent: (u8, u8, u8),
 }
 
-/// The decoded-art cache is capped by entry count and by pixel bytes (w*h*3).
-const CACHE_CAP: usize = 24;
-const CACHE_BYTES: usize = 6 << 20;
-static CACHE: Mutex<Vec<(String, Art)>> = Mutex::new(Vec::new());
-static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-/// At most 4 loads fetch/decode at once, which bounds both threads and transient buffers.
-static SEM: Semaphore = Semaphore::const_new(4);
+impl Art {
+    fn bytes(&self) -> usize {
+        self.buf.width() as usize * self.buf.height() as usize * 3
+    }
+}
 
-/// A downloaded JPEG body (reqwest's `Bytes`, type-erased so no extra crate is needed).
-type Body = Arc<dyn AsRef<[u8]> + Send + Sync>;
-/// The last two downloaded bodies, so loading one URL at several sizes (now playing big + bar)
-/// downloads it once; concurrent loads of a URL share the same in-flight fetch.
-static BODIES: Mutex<Vec<(String, Arc<OnceCell<Body>>)>> = Mutex::new(Vec::new());
-
-/// Smallest image whose width is >= `px`, else the largest. Images without a size (user
-/// playlists) count as 0 wide, so ties resolve to the first entry, which Spotify lists largest.
 /// A Spotify image entry.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpImage {
     pub url: String,
     pub width: Option<u32>,
     pub height: Option<u32>,
 }
 
-pub fn pick_url(images: &[SpImage], px: u32) -> Option<String> {
-    let w = |i: &&SpImage| i.width.or(i.height).unwrap_or(0);
-    images
-        .iter()
-        .filter(|i| w(i) >= px)
-        .min_by_key(w)
-        .or_else(|| images.iter().rev().max_by_key(w))
-        .map(|i| i.url.clone())
+/// Physical pixels a slot of `display_px` logical pixels needs at `scale_factor`.
+pub fn physical(display_px: f32, scale_factor: f32) -> u32 {
+    (display_px * scale_factor).round().max(1.0) as u32
 }
 
-/// Fetch `url`, decode at `px`x`px`. Cached by url+px (LRU, 24 entries / 6 MB). `None` on any failure.
-pub async fn load(url: &str, px: u32) -> Option<Art> {
-    let key = format!("{url}@{px}");
-    {
-        let mut cache = CACHE.lock().ok()?;
-        if let Some(i) = cache.iter().position(|(k, _)| *k == key) {
-            let hit = cache.remove(i);
-            let art = hit.1.clone();
-            cache.insert(0, hit);
-            return Some(art);
-        }
-    }
-    let _permit = SEM.acquire().await.ok()?;
-    let body = body(url).await.map_err(|e| eprintln!("art: {url}: {e}")).ok()?;
-    let art = tokio::task::spawn_blocking(move || decode(AsRef::<[u8]>::as_ref(&*body), px))
-        .await
-        .ok()?
-        .map_err(|e| eprintln!("art: {url}: {e}"))
-        .ok()?;
-    if let Ok(mut cache) = CACHE.lock() {
-        cache.retain(|(k, _)| *k != key);
-        cache.insert(0, (key, art.clone()));
-        let size = |a: &Art| a.buf.width() as usize * a.buf.height() as usize * 3;
-        let mut bytes: usize = cache.iter().map(|(_, a)| size(a)).sum();
-        while cache.len() > 1 && (cache.len() > CACHE_CAP || bytes > CACHE_BYTES) {
-            if let Some((_, old)) = cache.pop() {
-                bytes -= size(&old);
-            }
-        }
-    }
+/// The image to download for a slot `display_px` logical pixels wide at `scale_factor`: the
+/// smallest one at least that many physical pixels wide, or the largest when none is big enough.
+/// So the 64 px image is only ever picked for slots of 64 physical pixels or less.
+/// Images without a size (user-uploaded playlist covers) count as large enough for any slot;
+/// Spotify lists those largest first.
+pub fn pick_image(images: &[SpImage], display_px: f32, scale_factor: f32) -> Option<&SpImage> {
+    let need = physical(display_px, scale_factor);
+    let width = |i: &&SpImage| i.width.or(i.height);
+    images
+        .iter()
+        .filter(|i| width(i).is_some_and(|w| w >= need))
+        .min_by_key(|i| width(i).unwrap_or(u32::MAX))
+        .or_else(|| images.iter().find(|i| width(i).is_none()))
+        .or_else(|| images.iter().max_by_key(|i| width(i).unwrap_or(0)))
+}
+
+/// `pick_image` for call sites that only need the URL.
+pub fn pick_url(images: &[SpImage], display_px: f32, scale_factor: f32) -> Option<String> {
+    pick_image(images, display_px, scale_factor).map(|i| i.url.clone())
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Memory cache: decoded pixels, LRU by (url, px), bounded by bytes and by entry count.
+
+const CACHE_BYTES: usize = 12 << 20;
+const CACHE_ENTRIES: usize = 256;
+
+struct Lru {
+    /// Most recently used first.
+    entries: VecDeque<(String, u32, Art)>,
+    bytes: usize,
+}
+
+static CACHE: Mutex<Lru> = Mutex::new(Lru { entries: VecDeque::new(), bytes: 0 });
+
+/// The decoded image for (url, px) if it is in memory. Cheap; safe on the UI thread.
+pub fn cached(url: &str, px: u32) -> Option<Art> {
+    let mut c = lock(&CACHE);
+    let i = c.entries.iter().position(|(u, p, _)| *p == px && u == url)?;
+    let hit = c.entries.remove(i)?;
+    let art = hit.2.clone();
+    c.entries.push_front(hit);
     Some(art)
 }
 
-async fn body(url: &str) -> Result<Body, String> {
+/// The largest copy of any of `images` that is in memory, at any size: something to show at once
+/// while the right size loads. Never stored under the target key, so a small copy is never
+/// reused as the final image of a larger slot.
+pub fn cached_any(images: &[SpImage]) -> Option<Art> {
+    let c = lock(&CACHE);
+    c.entries.iter().filter(|(u, _, _)| images.iter().any(|i| i.url == *u)).max_by_key(|(_, p, _)| *p).map(|e| e.2.clone())
+}
+
+fn remember(url: &str, px: u32, art: &Art) {
+    let mut c = lock(&CACHE);
+    if let Some(i) = c.entries.iter().position(|(u, p, _)| *p == px && u == url)
+        && let Some(old) = c.entries.remove(i)
+    {
+        c.bytes -= old.2.bytes();
+    }
+    c.bytes += art.bytes();
+    c.entries.push_front((url.to_string(), px, art.clone()));
+    while c.entries.len() > 1 && (c.entries.len() > CACHE_ENTRIES || c.bytes > CACHE_BYTES) {
+        if let Some(old) = c.entries.pop_back() {
+            c.bytes -= old.2.bytes();
+        }
+    }
+}
+
+/// (entries, bytes) of the memory cache, for the memory report.
+pub fn cache_usage() -> (usize, usize) {
+    let c = lock(&CACHE);
+    (c.entries.len(), c.bytes)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Bodies: disk cache, then network. Concurrent loads of one URL share one fetch.
+
+/// A downloaded image body (reqwest's `Bytes`, type-erased so no extra crate is needed).
+type Body = Arc<dyn AsRef<[u8]> + Send + Sync>;
+/// The fetch in flight for each URL plus the last few finished ones, so one URL wanted at
+/// several sizes (bar + lyrics page) downloads once. Bounded.
+static BODIES: Mutex<VecDeque<(String, Arc<OnceCell<(Body, bool)>>)>> = Mutex::new(VecDeque::new());
+const BODIES_KEPT: usize = 4;
+/// Network downloads in flight at once (the direct path; the list path has its own workers).
+static DOWNLOADS: Semaphore = Semaphore::const_new(6);
+
+async fn disk(url: &str) -> Option<Vec<u8>> {
+    // Spotify art URLs are immutable, so a copy on disk is good forever (pruned by size).
+    let name = crate::cache::key(url);
+    tokio::task::spawn_blocking(move || crate::cache::read("art", &name, None)).await.ok().flatten()
+}
+
+/// The body of `url` and whether it came from the network just now.
+async fn body(url: &str) -> Result<(Body, bool), String> {
     let cell = {
-        let mut bodies = BODIES.lock().map_err(|e| e.to_string())?;
-        match bodies.iter().position(|(u, _)| u == url) {
-            Some(i) => bodies[i].1.clone(),
+        let mut bodies = lock(&BODIES);
+        match bodies.iter().find(|(u, _)| u == url) {
+            Some((_, cell)) => cell.clone(),
             None => {
                 let cell = Arc::new(OnceCell::new());
-                bodies.insert(0, (url.to_string(), cell.clone()));
-                bodies.truncate(2);
+                bodies.push_front((url.to_string(), cell.clone()));
+                bodies.truncate(BODIES_KEPT);
                 cell
             }
         }
     };
-    cell.get_or_try_init(|| fetch(url)).await.cloned()
+    // Only the first caller of a shared fetch reports it as fresh.
+    let mut first = false;
+    let got = cell
+        .get_or_try_init(|| async {
+            first = true;
+            if let Some(bytes) = disk(url).await {
+                return Ok::<_, String>((Arc::new(bytes) as Body, false));
+            }
+            let _permit = DOWNLOADS.acquire().await.map_err(|e| e.to_string())?;
+            let resp = crate::http::client().get(url).send().await.map_err(|e| e.to_string())?;
+            let resp = resp.error_for_status().map_err(|e| e.to_string())?;
+            let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+            let (name, copy) = (crate::cache::key(url), bytes.clone());
+            tokio::task::spawn_blocking(move || crate::cache::write("art", &name, &copy));
+            Ok((Arc::new(bytes) as Body, true))
+        })
+        .await?;
+    Ok((got.0.clone(), got.1 && first))
 }
 
-async fn fetch(url: &str) -> Result<Body, String> {
-    let client = CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .pool_max_idle_per_host(2)
-            .pool_idle_timeout(Duration::from_secs(15))
-            .build()
-            .unwrap_or_default()
-    });
-    // Spotify art URLs are immutable, so a copy on disk is good forever (pruned by size).
-    let name = crate::cache::key(url);
-    if let Some(bytes) = tokio::task::spawn_blocking({ let n = name.clone(); move || crate::cache::read("art", &n, None) })
-        .await
-        .ok()
-        .flatten()
-    {
-        return Ok(Arc::new(bytes));
+async fn decode_body(url: &str, px: u32, body: Body) -> Option<Art> {
+    debug_assert_off_ui_thread();
+    let art = tokio::task::spawn_blocking(move || decode(AsRef::<[u8]>::as_ref(&*body), px)).await.ok()?;
+    match art {
+        Ok(art) => {
+            remember(url, px, &art);
+            Some(art)
+        }
+        Err(e) => {
+            crate::logln!("art: {url}: {e}");
+            None
+        }
     }
-    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
-    let resp = resp.error_for_status().map_err(|e| e.to_string())?;
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    let copy = bytes.clone();
-    tokio::task::spawn_blocking(move || crate::cache::write("art", &name, &copy));
-    Ok(Arc::new(bytes))
+}
+
+/// Fetch `url` and decode it at `px` x `px`. `None` on any failure.
+pub async fn load(url: &str, px: u32) -> Option<Art> {
+    load_fresh(url, px).await.map(|(art, _)| art)
+}
+
+/// `load`, plus whether the image was downloaded just now (true) or came from a cache (false).
+pub async fn load_fresh(url: &str, px: u32) -> Option<(Art, bool)> {
+    if let Some(art) = cached(url, px) {
+        return Some((art, false));
+    }
+    let (body, fresh) = body(url).await.map_err(|e| crate::logln!("art: {url}: {e}")).ok()?;
+    decode_body(url, px, body).await.map(|art| (art, fresh))
+}
+
+thread_local! {
+    static UI_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the calling thread as the UI thread (call once from main).
+pub fn mark_ui_thread() {
+    UI_THREAD.with(|t| t.set(true));
+}
+
+/// Debug builds: decoding and HTTP must never run on the UI thread.
+pub fn debug_assert_off_ui_thread() {
+    debug_assert!(!UI_THREAD.with(|t| t.get()), "art / HTTP work on the UI thread");
+}
+
+// ---------------------------------------------------------------------------------------------
+// List path: a small priority queue in front of a fixed set of workers.
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Priority {
+    /// A row on screen. Newest request first: after a fast scroll the rows now visible win.
+    Visible,
+    /// Rows a screen or two ahead. Only when nothing visible is waiting.
+    Prefetch,
+}
+
+/// Called once with the image and whether it was downloaded just now, or `None` when the
+/// request was dropped (page left, pushed out of the queue, or failed) so the row can ask again.
+type Done = Box<dyn FnOnce(Option<(Art, bool)>) + Send>;
+
+struct Job {
+    url: String,
+    px: u32,
+    page: u64,
+    done: Done,
+}
+
+struct Queue {
+    visible: VecDeque<Job>,
+    prefetch: VecDeque<Job>,
+}
+
+static QUEUE: Mutex<Queue> = Mutex::new(Queue { visible: VecDeque::new(), prefetch: VecDeque::new() });
+static WAKE: Notify = Notify::const_new();
+static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
+/// The page art is being loaded for; jobs queued for an earlier page are dropped.
+static PAGE: AtomicU64 = AtomicU64::new(0);
+/// Parallel downloads on the list path.
+const WORKERS: usize = 6;
+/// Waiting requests kept per class. A fast scroll pushes more than this through; the oldest
+/// (rows long gone) fall out and are told so.
+const QUEUE_VISIBLE: usize = 48;
+const QUEUE_PREFETCH: usize = 96;
+
+/// Navigation: everything still queued for the previous page is dropped.
+pub fn set_page(page: u64) {
+    PAGE.store(page, Relaxed);
+    let stale: Vec<Job> = {
+        let mut q = lock(&QUEUE);
+        let q = &mut *q;
+        q.visible.drain(..).chain(q.prefetch.drain(..)).collect()
+    };
+    for job in stale {
+        (job.done)(None);
+    }
+}
+
+/// (visible, prefetch) requests waiting, for the memory report.
+pub fn queue_len() -> (usize, usize) {
+    let q = lock(&QUEUE);
+    (q.visible.len(), q.prefetch.len())
+}
+
+/// Asks for `url` at `px` for a list row. Memory hits answer at once on the calling thread;
+/// disk hits skip the download queue; everything else waits its turn by priority.
+pub fn request(url: String, px: u32, priority: Priority, page: u64, done: impl FnOnce(Option<(Art, bool)>) + Send + 'static) {
+    if let Some(art) = cached(&url, px) {
+        return done(Some((art, false)));
+    }
+    let done: Done = Box::new(done);
+    crate::runtime().spawn(async move {
+        // On disk already: decode now, no need to wait behind downloads.
+        if let Some(bytes) = disk(&url).await {
+            let art = decode_body(&url, px, Arc::new(bytes)).await;
+            return done(art.map(|a| (a, false)));
+        }
+        if page != PAGE.load(Relaxed) {
+            return done(None);
+        }
+        let dropped = {
+            let mut q = lock(&QUEUE);
+            let (list, cap) = match priority {
+                Priority::Visible => (&mut q.visible, QUEUE_VISIBLE),
+                Priority::Prefetch => (&mut q.prefetch, QUEUE_PREFETCH),
+            };
+            list.push_back(Job { url, px, page, done });
+            if list.len() > cap { list.pop_front() } else { None }
+        };
+        if let Some(job) = dropped {
+            (job.done)(None);
+        }
+        if !WORKERS_STARTED.swap(true, Relaxed) {
+            for _ in 0..WORKERS {
+                tokio::spawn(worker());
+            }
+        }
+        WAKE.notify_one();
+    });
+}
+
+fn next_job() -> Option<Job> {
+    let mut q = lock(&QUEUE);
+    // Visible: newest first. Prefetch: in order.
+    q.visible.pop_back().or_else(|| q.prefetch.pop_front())
+}
+
+/// Parked (no CPU) until a request arrives.
+async fn worker() {
+    loop {
+        let Some(job) = next_job() else {
+            WAKE.notified().await;
+            continue;
+        };
+        if job.page != PAGE.load(Relaxed) {
+            (job.done)(None);
+            continue;
+        }
+        let got = load_fresh(&job.url, job.px).await;
+        (job.done)(got);
+        // More waiting: make sure another worker is awake too.
+        WAKE.notify_one();
+    }
 }
 
 fn decode(data: &[u8], px: u32) -> Result<Art, String> {

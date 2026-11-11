@@ -121,7 +121,7 @@ impl Token {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ApiError {
     /// No usable sign-in (declined, timed out, or the refresh token died and sign-in failed).
     Auth(String),
@@ -174,10 +174,7 @@ impl Web {
     /// Loads the stored token (refreshing it if stale) or runs the browser sign-in.
     pub async fn connect(client_id: &str) -> Result<Arc<Web>, ApiError> {
         let web = Arc::new(Web {
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .build()
-                .map_err(|e| ApiError::Network(e.to_string()))?,
+            http: crate::http::client().clone(),
             client_id: client_id.to_string(),
             path: crate::auth::data_dir().join("web_token.json"),
             token: tokio::sync::Mutex::new(None),
@@ -351,10 +348,16 @@ impl Web {
         Ok(t)
     }
 
-    /// One Web API call. 429 waits `Retry-After` (up to 30 s, 3 tries); 401 forces one refresh.
-    /// An empty 2xx body comes back as `Value::Null`.
+    /// One Web API call. An empty 2xx body comes back as `Value::Null`.
+    /// - 429: waits the `Retry-After` seconds, then retries.
+    /// - Network errors and 5xx: capped exponential backoff, for calls that are safe to repeat
+    ///   (GET, PUT, DELETE). A POST is never repeated: it could create something twice.
+    /// - 401: forces one token refresh.
     pub async fn call(&self, method: Method, path: &str, query: &[(&str, &str)], body: Option<&Value>) -> Result<Value, ApiError> {
+        crate::art::debug_assert_off_ui_thread();
+        let repeatable = method != Method::POST;
         let mut retries = 0;
+        let mut attempt = 0;
         let mut reauthed = false;
         loop {
             let access = self.access().await?;
@@ -365,8 +368,21 @@ impl Web {
                 None if method != Method::GET => req.header("content-length", "0"),
                 None => req,
             };
-            let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(_) if repeatable && attempt < crate::http::RETRIES => {
+                    tokio::time::sleep(crate::http::backoff(attempt)).await;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => return Err(ApiError::Network(e.to_string())),
+            };
             let status = resp.status();
+            if status.is_server_error() && repeatable && attempt < crate::http::RETRIES {
+                tokio::time::sleep(crate::http::backoff(attempt)).await;
+                attempt += 1;
+                continue;
+            }
             if status.is_success() {
                 let bytes = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?;
                 if bytes.iter().all(u8::is_ascii_whitespace) {
@@ -381,7 +397,7 @@ impl Web {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(2u64);
-                if wait <= 30 {
+                if wait <= crate::http::MAX_RETRY_AFTER {
                     retries += 1;
                     tokio::time::sleep(Duration::from_secs(wait.max(1))).await;
                     continue;

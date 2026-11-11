@@ -8,8 +8,11 @@ use crate::art::SpImage;
 use crate::cache;
 use crate::web::ApiError;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
+use tokio::sync::OnceCell;
 
 pub fn s(v: &Value) -> &str {
     v.as_str().unwrap_or("")
@@ -55,29 +58,74 @@ fn max_age(path: &str) -> Duration {
     })
 }
 
-/// One GET through the disk cache (reused across launches until `max_age`).
-pub async fn get(path: &str, query: &[(&str, &str)]) -> Result<Value, ApiError> {
-    let web = crate::web().ok_or_else(not_signed_in)?;
+/// Where a read may come from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// The disk cache only, whatever its age. Never touches the network: this is what a page
+    /// shows the instant it opens (stale-while-revalidate, first half).
+    Cache,
+    /// The disk cache while it is younger than the path's `max_age`, else the network
+    /// (second half: the refresh that updates the page in place).
+    Network,
+}
+
+fn cache_name(path: &str, query: &[(&str, &str)]) -> String {
     let mut parts: Vec<String> = query.iter().map(|(k, v)| format!("{k}={v}")).collect();
     parts.sort();
     let epoch = if path.starts_with("me/") || path.starts_with("playlists/") { LIBRARY_EPOCH.load(Relaxed) } else { 0 };
-    let name = format!("{}.json", cache::key(&format!("{path}?{}#{epoch}", parts.join("&"))));
-    let age = max_age(path);
-    let n2 = name.clone();
-    if let Some(b) = tokio::task::spawn_blocking(move || cache::read("api", &n2, Some(age))).await.ok().flatten()
-        && let Ok(v) = serde_json::from_slice(&b)
-    {
+    format!("{}.json", cache::key(&format!("{path}?{}#{epoch}", parts.join("&"))))
+}
+
+async fn read_cache(name: String, max_age: Option<Duration>) -> Option<Value> {
+    let bytes = tokio::task::spawn_blocking(move || cache::read("api", &name, max_age)).await.ok().flatten()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// GETs in flight, by cache name: a second identical request waits for the first instead of
+/// going out again. Entries are removed when the request finishes, so the map stays tiny.
+static IN_FLIGHT: LazyLock<Mutex<HashMap<String, Arc<OnceCell<Result<Value, ApiError>>>>>> = LazyLock::new(Default::default);
+
+/// One GET over the network, shared with any identical request already in flight.
+async fn fetch(path: &str, query: &[(&str, &str)]) -> Result<Value, ApiError> {
+    let web = crate::web().ok_or_else(not_signed_in)?;
+    let name = cache_name(path, query);
+    let cell = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner()).entry(name.clone()).or_default().clone();
+    let result = cell.get_or_init(|| async { web.get(path, query).await }).await.clone();
+    let mut map = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+    if map.get(&name).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+        map.remove(&name);
+    }
+    result
+}
+
+/// One GET from `source`. Responses fetched over the network are written to the disk cache.
+/// The cache holds response bodies only: never a token or the client ID.
+pub async fn get_from(source: Source, path: &str, query: &[(&str, &str)]) -> Result<Value, ApiError> {
+    let name = cache_name(path, query);
+    let max = match source {
+        Source::Cache => None,
+        Source::Network => Some(max_age(path)),
+    };
+    if let Some(v) = read_cache(name.clone(), max).await {
         return Ok(v);
     }
-    let v = web.get(path, query).await?;
+    if source == Source::Cache {
+        return Err(ApiError::Network("not in the cache yet".into()));
+    }
+    let v = fetch(path, query).await?;
     let data = v.to_string();
     tokio::task::spawn_blocking(move || cache::write("api", &name, data.as_bytes()));
     Ok(v)
 }
 
+/// One GET through the disk cache (reused across launches until `max_age`).
+pub async fn get(path: &str, query: &[(&str, &str)]) -> Result<Value, ApiError> {
+    get_from(Source::Network, path, query).await
+}
+
 /// GET without the cache (state that must be current: liked / followed checks).
 pub async fn get_fresh(path: &str, query: &[(&str, &str)]) -> Result<Value, ApiError> {
-    crate::web().ok_or_else(not_signed_in)?.get(path, query).await
+    fetch(path, query).await
 }
 
 pub async fn call(method: reqwest::Method, path: &str, query: &[(&str, &str)], body: Option<&Value>) -> Result<Value, ApiError> {

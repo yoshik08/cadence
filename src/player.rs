@@ -19,7 +19,7 @@ use librespot_playback::{
     player::{Player as LsPlayer, PlayerEvent},
 };
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering},
 };
 use std::time::Duration;
@@ -551,15 +551,17 @@ pub async fn lyrics_pipeline(
 }
 
 
-fn http() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .user_agent("yoshik.xyz/lyrics")
-            .build()
-            .unwrap_or_default()
-    })
+/// Lyrics providers: the shared client, with the user agent they ask clients to send.
+struct LyricsHttp;
+
+impl LyricsHttp {
+    fn get(&self, url: &str) -> reqwest::RequestBuilder {
+        crate::http::client().get(url).header(reqwest::header::USER_AGENT, "yoshik.xyz/lyrics").timeout(Duration::from_secs(10))
+    }
+}
+
+fn http() -> LyricsHttp {
+    LyricsHttp
 }
 
 /// Word race: LRCMUX word-level + NetEase YRC in parallel; first with per-word timings wins.

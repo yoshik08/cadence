@@ -30,15 +30,18 @@ fn track_item(x: &serde_json::Value) -> Option<LibItem> {
         added_at: s(&x["added_at"]).into(),
         duration_ms: n(&t["duration_ms"]) as i64,
         explicit: t["explicit"].as_bool().unwrap_or(false),
-        image: pick_small(&t["album"]["images"]),
+        image: covers(&t["album"]["images"]).0,
+        image_lg: covers(&t["album"]["images"]).1,
         ..Default::default()
     })
 }
 
-/// The smallest image URL >= 64 px (sidebar / rows), else the first.
-fn pick_small(imgs: &serde_json::Value) -> String {
+/// Two cover URLs per item: about 64 px for row thumbnails and about 300 px for cards and
+/// anything larger (`db::LibItem::art_url` picks between them).
+fn covers(imgs: &serde_json::Value) -> (String, String) {
     let list = api::images(imgs);
-    crate::art::pick_url(&list, 64).unwrap_or_default()
+    let pick = |px: f32| crate::art::pick_url(&list, px, 1.0).unwrap_or_default();
+    (pick(64.0), pick(300.0))
 }
 
 async fn pages(path: &str, f: impl Fn(&serde_json::Value) -> Option<LibItem>) -> Result<Vec<LibItem>, ApiError> {
@@ -72,7 +75,8 @@ async fn fetch(kind: &str) -> Result<Vec<LibItem>, ApiError> {
                     artist: api::names(&a["artists"]),
                     artist_uri: s(&a["artists"][0]["uri"]).into(),
                     added_at: s(&x["added_at"]).into(),
-                    image: pick_small(&a["images"]),
+                    image: covers(&a["images"]).0,
+        image_lg: covers(&a["images"]).1,
                     total: n(&a["total_tracks"]) as i64,
                     album: s(&a["release_date"]).into(),
                     ..Default::default()
@@ -92,7 +96,8 @@ async fn fetch(kind: &str) -> Result<Vec<LibItem>, ApiError> {
                     collaborative: p["collaborative"].as_bool().unwrap_or(false),
                     public: p["public"].as_bool().unwrap_or(false),
                     total: n(&api::present(&p["items"], &p["tracks"])["total"]) as i64,
-                    image: pick_small(&p["images"]),
+                    image: covers(&p["images"]).0,
+        image_lg: covers(&p["images"]).1,
                     ..Default::default()
                 })
             })
@@ -108,7 +113,8 @@ async fn fetch(kind: &str) -> Result<Vec<LibItem>, ApiError> {
                     title: s(&sh["name"]).into(),
                     subtitle: s(&sh["publisher"]).into(),
                     added_at: s(&x["added_at"]).into(),
-                    image: pick_small(&sh["images"]),
+                    image: covers(&sh["images"]).0,
+        image_lg: covers(&sh["images"]).1,
                     total: n(&sh["total_episodes"]) as i64,
                     ..Default::default()
                 })
@@ -134,7 +140,8 @@ async fn fetch(kind: &str) -> Result<Vec<LibItem>, ApiError> {
                             kind: "artist".into(),
                             title: s(&a["name"]).into(),
                             subtitle: "Artist".into(),
-                            image: pick_small(&a["images"]),
+                            image: covers(&a["images"]).0,
+        image_lg: covers(&a["images"]).1,
                             ..Default::default()
                         });
                     }

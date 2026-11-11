@@ -38,8 +38,9 @@ pub fn read(sub: &str, name: &str, max_age: Option<Duration>) -> Option<Vec<u8>>
 
 /// Writes atomically (temp file + rename), so a crash never leaves a half file behind.
 pub fn write(sub: &str, name: &str, data: &[u8]) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let d = dir(sub);
-    let tmp = d.join(format!("{name}.tmp"));
+    let tmp = d.join(format!("{name}.{}.tmp", SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     if std::fs::write(&tmp, data).is_ok() && std::fs::rename(&tmp, d.join(name)).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -52,6 +53,11 @@ pub fn prune(sub: &str, max_bytes: u64) {
         .flatten()
         .filter_map(|e| {
             let m = e.metadata().ok()?;
+            // Temp files left by a crash mid-write are removed outright.
+            if e.path().extension().is_some_and(|x| x == "tmp") {
+                let _ = std::fs::remove_file(e.path());
+                return None;
+            }
             m.is_file().then(|| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len(), e.path()))
         })
         .collect();
