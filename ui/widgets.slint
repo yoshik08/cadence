@@ -497,10 +497,14 @@ export component Field inherits Rectangle {
     in property <bool> auto-focus;
     in property <bool> single-line: true;
     in property <bool> enabled: true;
+    // Optional icon at the start (a 24-grid path, e.g. a magnifier).
+    in property <string> icon;
+    out property <bool> has-focus: input.has-focus;
     callback edited(string);
     callback accepted(string);
     callback key(KeyEvent) -> EventResult;
     forward-focus: input;
+    property <length> text-x: root.icon != "" ? Tokens.space-sm + Tokens.icon-sm + Tokens.space-sm : Tokens.space-md;
     // Height of the placeholder line in a multi-line field.
     property <length> line-height: Tokens.space-xl;
     height: Tokens.control-lg;
@@ -509,9 +513,16 @@ export component Field inherits Rectangle {
     background: Tokens.bg-surface;
     border-width: input.has-focus ? Tokens.hairline : 0px;
     border-color: Tokens.focus-ring;
+    if root.icon != "" : Glyph {
+        x: Tokens.space-sm;
+        y: (parent.height - self.height) / 2;
+        size: Tokens.icon-sm;
+        commands: root.icon;
+        tint: Tokens.text-tertiary;
+    }
     Label {
-        x: Tokens.space-md;
-        width: parent.width - 2 * Tokens.space-md;
+        x: root.text-x;
+        width: parent.width - root.text-x - Tokens.space-md;
         height: root.single-line ? parent.height : root.line-height;
         y: root.single-line ? 0px : Tokens.space-sm;
         vertical-alignment: center;
@@ -521,8 +532,8 @@ export component Field inherits Rectangle {
         visible: root.text == "";
     }
     FocusScope {
-        x: Tokens.space-md;
-        width: parent.width - 2 * Tokens.space-md;
+        x: root.text-x;
+        width: parent.width - root.text-x - Tokens.space-md;
         key-pressed(e) => { return root.key(e); }
         input := TextInput {
             init => {

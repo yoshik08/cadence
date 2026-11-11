@@ -75,6 +75,13 @@ export global Browse {
     // Sidebar
     in property <[SideItem]> side-items;
     in-out property <string> side-filter;
+    // The "Playlists" heading has turned into the search field.
+    in-out property <bool> side-search-open;
+    // Every mouse press in the window (Rust counts them; position in window coordinates), so the
+    // empty playlist search can collapse when the press lands outside it.
+    in property <int> presses;
+    in property <length> press-x;
+    in property <length> press-y;
     in property <bool> show-local;
     callback side-filter-edited(string);
     callback side-toggle(string);
@@ -235,6 +242,14 @@ component NavItem inherits Rectangle {
 }
 
 export component Sidebar inherits Rectangle {
+    // Collapses the playlist search back to its heading and shows every playlist again.
+    function close-search() {
+        Browse.side-search-open = false;
+        if (Browse.side-filter != "") {
+            Browse.side-filter = "";
+            Browse.side-filter-edited("");
+        }
+    }
     property <length> header-height: 40px;
     width: Tokens.sidebar-width;
     background: Tokens.bg-base;
@@ -289,12 +304,48 @@ export component Sidebar inherits Rectangle {
         HorizontalLayout {
             padding-top: Tokens.space-sm;
             spacing: Tokens.space-xs;
-            Field {
+            // "Playlists": click to search them. The search field takes the same spot and height.
+            if !Browse.side-search-open : Rectangle {
                 height: Tokens.control-sm;
-                placeholder: "Filter";
+                horizontal-stretch: 1;
+                Caption {
+                    x: Tokens.space-md;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: "Playlists";
+                    font-weight: Tokens.weight-semibold;
+                    color: heading-ta.has-hover ? Tokens.text-secondary : Tokens.text-tertiary;
+                    animate color { duration: Tokens.duration-fast; easing: Tokens.ease-out; }
+                }
+                heading-ta := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { Browse.side-search-open = true; }
+                }
+            }
+            if Browse.side-search-open : search := Field {
+                height: Tokens.control-sm;
+                horizontal-stretch: 1;
+                icon: Icons.search;
+                placeholder: "Search playlists";
                 font-size: Tokens.size-caption;
+                auto-focus: true;
                 text <=> Browse.side-filter;
                 edited(t) => { Browse.side-filter-edited(t); }
+                key(e) => {
+                    if (e.text == Key.Escape) {
+                        root.close-search();
+                        return accept;
+                    }
+                    return reject;
+                }
+                // A press anywhere else while it is empty puts the heading back.
+                property <int> presses: Browse.presses;
+                changed presses => {
+                    if (Browse.side-filter == "" && !(Browse.press-x >= self.absolute-position.x && Browse.press-x <= self.absolute-position.x + self.width
+                        && Browse.press-y >= self.absolute-position.y && Browse.press-y <= self.absolute-position.y + self.height)) {
+                        root.close-search();
+                    }
+                }
             }
             IconButton {
                 round: true;

@@ -1523,9 +1523,8 @@ pub fn fill_sidebar(ui: &MainWindow) {
             out.push(item(&l.title, &l.uri, "playlist", 0));
         }
     }
-    if matches("Liked Songs") {
-        out.push(item("Liked Songs", "liked", "liked", 0));
-    }
+    // Liked Songs stays pinned whatever the search says.
+    out.push(item("Liked Songs", "liked", "liked", 0));
     if b.get_show_local() && matches("Local files") {
         out.push(item("Local files", "local", "local", 0));
     }

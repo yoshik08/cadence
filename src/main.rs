@@ -255,6 +255,8 @@ pub fn show_restored(ui: &MainWindow, saved: &queue::Saved, m: &player::ItemMeta
 thread_local! {
     /// UI thread only.
     static SMTC: RefCell<Option<smtc::Smtc>> = const { RefCell::new(None) };
+    /// Last pointer position in the main window, physical pixels.
+    static CURSOR: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((0.0, 0.0)) };
 }
 
 /// Native HWND of the Slint window. Only `Some` once the winit window exists: call it from
@@ -1044,6 +1046,13 @@ static CADENCE_SWEEP_DONE: AtomicBool = AtomicBool::new(false);
 /// CADENCE_SHOTS="ms:file.png,...": snapshots at those offsets, then quit (test builds).
 fn schedule_shots(ui: &MainWindow) {
     schedule_sweep(ui);
+    // CADENCE_TEST_SIDE_SEARCH="text": open the sidebar's playlist search with that text.
+    if let Ok(q) = std::env::var("CADENCE_TEST_SIDE_SEARCH") {
+        let b = ui.global::<Browse>();
+        b.set_side_search_open(true);
+        b.set_side_filter(q.as_str().into());
+        browse::fill_sidebar(ui);
+    }
     // CADENCE_TEST_NOW="uri": mark that track as the one playing (row states in snapshots).
     if let Ok(uri) = std::env::var("CADENCE_TEST_NOW") {
         ui.global::<Browse>().set_current_uri(uri.into());
@@ -1318,6 +1327,20 @@ fn main() -> Result<(), slint::PlatformError> {
                         recheck_now_art(&ui);
                     }
                 });
+            }
+            if let WindowEvent::CursorMoved { position, .. } = ev {
+                CURSOR.with(|c| c.set((position.x as f32, position.y as f32)));
+            }
+            if let WindowEvent::MouseInput { state: ElementState::Pressed, .. } = ev
+                && let Some(ui) = main_ui()
+            {
+                // Window-coordinate presses for the sidebar's playlist search (logical pixels).
+                let (x, y) = CURSOR.with(|c| c.get());
+                let scale = ui.window().scale_factor();
+                let b = ui.global::<Browse>();
+                b.set_press_x(x / scale);
+                b.set_press_y(y / scale);
+                b.set_presses(b.get_presses().wrapping_add(1));
             }
             if let WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } = ev {
                 match button {
