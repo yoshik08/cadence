@@ -23,7 +23,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering},
 };
 use std::time::Duration;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
 
 pub enum Event {
@@ -50,7 +50,7 @@ pub struct Player {
     spirc: Spirc,
     session: Session,
     mixer: Arc<dyn Mixer>,
-    tx: UnboundedSender<Event>,
+    tx: Sender<Event>,
     // Last known shuffle/repeat/volume: Spirc resets shuffle/repeat on every load and ignores
     // volume commands while this device is not the active Connect device, so we re-apply them.
     shuffle: Arc<AtomicBool>,
@@ -72,7 +72,7 @@ impl Player {
     pub async fn start(
         creds: Credentials,
         cache: Cache,
-    ) -> Result<(Player, UnboundedReceiver<Event>), String> {
+    ) -> Result<(Player, Receiver<Event>), String> {
         let initial_volume = cache.volume().unwrap_or(u16::MAX / 2);
 
         // Default client id on Windows is the keymaster id, which matches the librespot-oauth token.
@@ -134,8 +134,8 @@ impl Player {
                 .await
                 .map_err(|e| e.to_string())?;
 
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(Event::Volume(initial_volume as f32 / u16::MAX as f32));
+        let (tx, rx) = mpsc::channel(EVENT_QUEUE);
+        emit(&tx, Event::Volume(initial_volume as f32 / u16::MAX as f32));
 
         let closing = Arc::new(AtomicBool::new(false));
         let spirc_task = {
@@ -143,7 +143,7 @@ impl Player {
             tokio::spawn(async move {
                 spirc_future.await;
                 if !closing.load(Ordering::Relaxed) {
-                    let _ = tx.send(Event::Error("Spotify connection closed".into()));
+                    emit(&tx, Event::Error("Spotify connection closed".into()));
                 }
             })
         };
@@ -151,8 +151,8 @@ impl Player {
         // Remembered across launches; Spirc gets them with every load.
         let shuffle = Arc::new(AtomicBool::new(crate::prefs::bool_or("shuffle", false)));
         let repeat = Arc::new(AtomicU8::new(crate::prefs::u64_or("repeat", 0).min(2) as u8));
-        let _ = tx.send(Event::Shuffle(shuffle.load(Ordering::Relaxed)));
-        let _ = tx.send(Event::Repeat(repeat.load(Ordering::Relaxed)));
+        emit(&tx, Event::Shuffle(shuffle.load(Ordering::Relaxed)));
+        emit(&tx, Event::Repeat(repeat.load(Ordering::Relaxed)));
         let volume = Arc::new(AtomicU16::new(initial_volume));
         let event_task = tokio::spawn(map_events(
             player_events,
@@ -390,7 +390,7 @@ impl Player {
 
     fn report(&self, r: Result<(), librespot_core::Error>) {
         if let Err(e) = r {
-            let _ = self.tx.send(Event::Error(e.to_string()));
+            emit(&self.tx, Event::Error(e.to_string()));
         }
     }
 }
@@ -550,6 +550,22 @@ pub async fn lyrics_pipeline(
     spotify
 }
 
+
+/// Player events waiting for the UI. They arrive a few per second and are consumed at once, so
+/// this never fills in practice; the bound only keeps a stalled UI from growing the queue.
+const EVENT_QUEUE: usize = 256;
+
+/// Queues an event for the UI. False once the UI side is gone. A full queue drops the event.
+fn emit(tx: &Sender<Event>, ev: Event) -> bool {
+    match tx.try_send(ev) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            crate::logln!("player: event queue full, event dropped");
+            true
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
 
 /// Lyrics providers: the shared client, with the user agent they ask clients to send.
 struct LyricsHttp;
@@ -1406,7 +1422,7 @@ fn push_word_line(
 
 async fn map_events(
     mut rx: librespot_playback::player::PlayerEventChannel,
-    tx: UnboundedSender<Event>,
+    tx: Sender<Event>,
     shuffle: Arc<AtomicBool>,
     repeat: Arc<AtomicU8>,
     volume: Arc<AtomicU16>,
@@ -1493,7 +1509,7 @@ async fn map_events(
             _ => None,
         };
         if let Some(out) = out {
-            if tx.send(out).is_err() {
+            if !emit(&tx, out) {
                 break;
             }
         }

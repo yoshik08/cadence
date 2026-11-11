@@ -37,6 +37,31 @@ pub fn on_position(position_ms: u32) {
     }
 }
 
+thread_local! {
+    /// Saves the episode position every 15 s. Runs only while an episode is playing: with music
+    /// or nothing playing, no timer exists.
+    static SAVER: slint::Timer = slint::Timer::default();
+}
+
+/// Playback started or stopped (UI thread).
+pub fn set_saving(ui: &MainWindow, playing: bool) {
+    let on = playing && ui.global::<Playback>().get_is_episode();
+    SAVER.with(|t| {
+        if !on {
+            return t.stop();
+        }
+        if t.running() {
+            return;
+        }
+        let weak = ui.as_weak();
+        t.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(15), move || {
+            if let Some(ui) = weak.upgrade() {
+                on_position(ui.global::<Playback>().get_position_ms().max(0) as u32);
+            }
+        });
+    });
+}
+
 fn apply_speed(ui: &MainWindow, speed: f32) {
     let speed = speed.clamp(0.5, 2.0);
     crate::audio::set_speed(speed);

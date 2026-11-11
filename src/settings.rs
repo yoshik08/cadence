@@ -326,4 +326,5 @@ pub fn apply_zoom(ui: &MainWindow) {
     let z = prefs::u64_or("zoom", 100) as f32 / 100.0;
     let base = ui.window().with_winit_window(|w| w.scale_factor() as f32).unwrap_or(1.0);
     ui.window().dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: base * z });
+    crate::recheck_now_art(ui);
 }

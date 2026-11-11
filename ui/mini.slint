@@ -69,6 +69,8 @@ export component MiniWindow inherits Window {
         x: root.text-x;
         y: Tokens.space-md;
         width: root.width - root.text-x - root.corner-buttons - Tokens.space-xl - Tokens.space-sm;
+        height: root.cover-size - Tokens.control-md;
+        alignment: start;
         spacing: Tokens.space-2xs;
         Label { text: root.track-title == "" ? "Nothing playing" : root.track-title; font-weight: Tokens.weight-semibold; }
         Caption { text: root.artist; }

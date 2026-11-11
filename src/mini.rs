@@ -188,3 +188,21 @@ fn is_foreground(ui: &MainWindow) -> bool {
 pub fn main_has_focus(ui: &MainWindow) -> bool {
     is_foreground(ui)
 }
+
+/// Test runs: shows the mini player and, a moment later, writes a snapshot of it and logs the
+/// size of the cover it was given against the size of its slot.
+pub fn test_shot(ui: &MainWindow, path: String) {
+    toggle(ui);
+    let scale = ui.window().scale_factor();
+    slint::Timer::single_shot(Duration::from_millis(1200), move || {
+        MINI.with(|c| {
+            if let Some((m, _)) = c.borrow().as_ref() {
+                let slot = (m.get_cover_size() * scale).round();
+                crate::logln!("mini: cover is {} px wide for a {slot} px slot (scale {scale})", m.get_art().size().width);
+                if let Err(e) = crate::save_snapshot(m.window(), &path) {
+                    crate::logln!("mini: snapshot failed: {e}");
+                }
+            }
+        });
+    });
+}

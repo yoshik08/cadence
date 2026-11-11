@@ -2981,6 +2981,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn patch_model_keeps_what_did_not_change() {
+        let model = VecModel::from(vec![1, 2, 3]);
+        let rows = |m: &VecModel<i32>| m.iter().collect::<Vec<_>>();
+        // Same rows: nothing to do.
+        patch_model(&model, vec![1, 2, 3]);
+        assert_eq!(rows(&model), [1, 2, 3]);
+        // Longer with the same start: the new rows are appended.
+        patch_model(&model, vec![1, 2, 3, 4, 5]);
+        assert_eq!(rows(&model), [1, 2, 3, 4, 5]);
+        // Same length, one row differs: that row is written.
+        patch_model(&model, vec![1, 9, 3, 4, 5]);
+        assert_eq!(rows(&model), [1, 9, 3, 4, 5]);
+        // Shorter: replaced.
+        patch_model(&model, vec![7]);
+        assert_eq!(rows(&model), [7]);
+        // From empty (first load).
+        let empty: VecModel<i32> = VecModel::default();
+        patch_model(&empty, vec![1, 2]);
+        assert_eq!(rows(&empty), [1, 2]);
+    }
+
+    #[test]
     fn fewer_repeats_spreads_artists() {
         let rows: Vec<TrackData> = (0..9)
             .map(|i| TrackData { uri: format!("u{i}"), artist: if i < 6 { "A".into() } else { format!("B{i}") }, ..Default::default() })

@@ -513,6 +513,7 @@ name = "cadence"
 version = "1.4.0"
 dependencies = [
  "base64 0.22.1",
+ "fast_image_resize",
  "getrandom 0.3.4",
  "jpeg-decoder",
  "jpeg-encoder",
@@ -533,6 +534,7 @@ dependencies = [
  "tokio",
  "ttf-parser",
  "windows 0.62.2",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -1298,6 +1300,18 @@ name = "fallible-streaming-iterator"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
+name = "fast_image_resize"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbc7fe45cf92b43817ff62a3723e862b85bd1d06288f63007f7645d1d2f7a060"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "num-traits",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "fastrand"

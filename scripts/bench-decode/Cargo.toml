@@ -1,0 +1,19 @@
+# Decoder benchmark for the art pipeline (v1.5 part 1, section D2). Run from the repo root:
+#   cargo run --release --manifest-path scripts/bench-decode/Cargo.toml -- <folder of cached covers>
+[package]
+name = "cadence-bench-decode"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jpeg-decoder = { version = "0.3.2", default-features = false }
+zune-jpeg = "0.5"
+fast_image_resize = "5"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+
+[workspace]

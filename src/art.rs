@@ -127,7 +127,9 @@ pub fn cache_usage() -> (usize, usize) {
 type Body = Arc<dyn AsRef<[u8]> + Send + Sync>;
 /// The fetch in flight for each URL plus the last few finished ones, so one URL wanted at
 /// several sizes (bar + lyrics page) downloads once. Bounded.
-static BODIES: Mutex<VecDeque<(String, Arc<OnceCell<(Body, bool)>>)>> = Mutex::new(VecDeque::new());
+static BODIES: Mutex<VecDeque<(String, SharedFetch)>> = Mutex::new(VecDeque::new());
+/// One fetch, shared by everyone waiting for that URL: the body and whether it was downloaded.
+type SharedFetch = Arc<OnceCell<(Body, bool)>>;
 const BODIES_KEPT: usize = 4;
 /// Network downloads in flight at once (the direct path; the list path has its own workers).
 static DOWNLOADS: Semaphore = Semaphore::const_new(6);
@@ -334,7 +336,51 @@ async fn worker() {
     }
 }
 
+/// Decodes a JPEG to a `px` x `px` square (centre crop). Two paths, chosen by measurement
+/// (scripts/bench-decode):
+/// - the slot is less than a quarter of the source: jpeg-decoder, which shrinks by 1/4 or 1/8
+///   inside the decode itself (as fast as anything, and it never holds the full image);
+/// - otherwise: zune-jpeg and fast_image_resize, 1.7x to 2.9x faster there.
 fn decode(data: &[u8], px: u32) -> Result<Art, String> {
+    let short_side = {
+        let mut probe = jpeg_decoder::Decoder::new(data);
+        probe.read_info().map_err(|e| e.to_string())?;
+        probe.info().map_or(0, |i| u32::from(i.width.min(i.height)))
+    };
+    let buf = match if short_side >= 4 * px { None } else { decode_full(data, px) } {
+        Some(buf) => buf,
+        None => decode_scaled(data, px)?,
+    };
+    Ok(Art { accent: accent(&buf), buf })
+}
+
+/// Full-size decode, then one resize straight into the pixel buffer. `None` for JPEGs this
+/// path does not handle; the caller falls back to `decode_scaled`.
+fn decode_full(data: &[u8], px: u32) -> Option<SharedPixelBuffer<Rgb8Pixel>> {
+    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer, images::Image};
+    use zune_jpeg::zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
+    let mut dec = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(data), options);
+    let raw = dec.decode().ok()?;
+    let info = dec.info()?;
+    let (w, h) = (info.width as u32, info.height as u32);
+    if w == 0 || h == 0 || raw.len() != w as usize * h as usize * 3 {
+        return None;
+    }
+    let side = w.min(h);
+    let src = Image::from_vec_u8(w, h, raw, PixelType::U8x3).ok()?;
+    let mut buf = SharedPixelBuffer::<Rgb8Pixel>::new(px, px);
+    let mut dst = Image::from_slice_u8(px, px, buf.make_mut_bytes(), PixelType::U8x3).ok()?;
+    // Area average when shrinking (what the other path does); bilinear when enlarging.
+    let filter = if side >= px { FilterType::Box } else { FilterType::Bilinear };
+    let options = ResizeOptions::new()
+        .resize_alg(ResizeAlg::Convolution(filter))
+        .crop((w - side) as f64 / 2.0, (h - side) as f64 / 2.0, side as f64, side as f64);
+    Resizer::new().resize(&src, &mut dst, &options).ok()?;
+    Some(buf)
+}
+
+fn decode_scaled(data: &[u8], px: u32) -> Result<SharedPixelBuffer<Rgb8Pixel>, String> {
     let e = |e: jpeg_decoder::Error| e.to_string();
     let mut dec = jpeg_decoder::Decoder::new(data);
     dec.read_info().map_err(e)?;
@@ -389,8 +435,7 @@ fn decode(data: &[u8], px: u32) -> Result<Art, String> {
             *out = Rgb8Pixel { r: (sum[0] / cnt) as u8, g: (sum[1] / cnt) as u8, b: (sum[2] / cnt) as u8 };
         }
     }
-    let accent = accent(&buf);
-    Ok(Art { buf, accent })
+    Ok(buf)
 }
 
 /// Dominant vivid colour: sample a coarse grid, vote into 12 hue bins weighted by saturation
@@ -700,4 +745,76 @@ pub fn save_rgb_png(buf: &SharedPixelBuffer<Rgb8Pixel>, path: &std::path::Path) 
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header().and_then(|mut w| w.write_image_data(buf.as_bytes())).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn img(w: u32) -> SpImage {
+        SpImage { url: format!("u{w}"), width: Some(w), height: Some(w) }
+    }
+
+    #[test]
+    fn picks_smallest_image_that_covers_the_slot() {
+        let spotify = [img(640), img(300), img(64)];
+        let url = |px: f32, scale: f32| pick_image(&spotify, px, scale).map(|i| i.url.as_str());
+        // Row thumbnails at 100 %: the 64 px image is enough.
+        assert_eq!(url(56.0, 1.0), Some("u64"));
+        // The same row at 125 % needs 70 px: never the 64 px image.
+        assert_eq!(url(56.0, 1.25), Some("u300"));
+        // Mini player cover (72 px) at 100 / 125 / 150 %.
+        assert_eq!(url(72.0, 1.0), Some("u300"));
+        assert_eq!(url(72.0, 1.25), Some("u300"));
+        assert_eq!(url(72.0, 1.5), Some("u300"));
+        // Cards (160 px) up to 150 % fit the 300 px image; at 200 % they need the 640.
+        assert_eq!(url(160.0, 1.5), Some("u300"));
+        assert_eq!(url(160.0, 2.0), Some("u640"));
+        // Lyrics page (540 px) at 150 % wants 810: the largest is used.
+        assert_eq!(url(540.0, 1.5), Some("u640"));
+    }
+
+    #[test]
+    fn both_decode_paths_agree() {
+        // A 96 px gradient, encoded here; decoded by each path to 48 px.
+        let (w, h) = (96u16, 96u16);
+        let rgb: Vec<u8> = (0..h as usize * w as usize).flat_map(|i| [(i % w as usize * 2) as u8, (i / w as usize * 2) as u8, 128]).collect();
+        let mut jpg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpg, 95).encode(&rgb, w, h, jpeg_encoder::ColorType::Rgb).unwrap();
+        let (full, scaled) = (decode_full(&jpg, 48).unwrap(), decode_scaled(&jpg, 48).unwrap());
+        assert_eq!((full.width(), full.height()), (48, 48));
+        let worst = full.as_bytes().iter().zip(scaled.as_bytes()).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+        assert!(worst <= 6, "the two paths differ by up to {worst} levels");
+        // The dispatcher: small slot takes the scaled path, large slot the full one; both work.
+        assert_eq!(decode(&jpg, 16).unwrap().buf.width(), 16);
+        assert_eq!(decode(&jpg, 200).unwrap().buf.width(), 200);
+        assert!(decode(b"not a jpeg", 16).is_err());
+    }
+
+    #[test]
+    fn unsized_images_count_as_large() {
+        // User-uploaded playlist covers come without sizes, largest first.
+        let covers = [SpImage { url: "big".into(), ..Default::default() }, SpImage { url: "small".into(), ..Default::default() }];
+        assert_eq!(pick_image(&covers, 160.0, 1.0).map(|i| i.url.as_str()), Some("big"));
+        assert_eq!(pick_image(&[], 160.0, 1.0), None);
+    }
+
+    #[test]
+    fn memory_cache_is_keyed_by_size_and_bounded() {
+        let art = |px: u32| Art { buf: SharedPixelBuffer::new(px, px), accent: (0, 0, 0) };
+        remember("test://a", 64, &art(64));
+        // A small copy is never returned for a larger slot.
+        assert!(cached("test://a", 64).is_some());
+        assert!(cached("test://a", 300).is_none());
+        assert_eq!(cached_any(&[SpImage { url: "test://a".into(), ..Default::default() }]).map(|a| a.buf.width()), Some(64));
+        // Far more than the budget goes in; the cache stays inside it.
+        for i in 0..40 {
+            remember(&format!("test://big{i}"), 640, &art(640));
+        }
+        let (entries, bytes) = cache_usage();
+        assert!(bytes <= CACHE_BYTES, "{bytes} bytes in the cache");
+        assert!(entries <= CACHE_ENTRIES);
+        assert!(cached("test://big39", 640).is_some(), "the newest entry survives");
+        assert!(cached("test://big0", 640).is_none(), "the oldest was evicted");
+    }
 }

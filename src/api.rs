@@ -83,7 +83,9 @@ async fn read_cache(name: String, max_age: Option<Duration>) -> Option<Value> {
 
 /// GETs in flight, by cache name: a second identical request waits for the first instead of
 /// going out again. Entries are removed when the request finishes, so the map stays tiny.
-static IN_FLIGHT: LazyLock<Mutex<HashMap<String, Arc<OnceCell<Result<Value, ApiError>>>>>> = LazyLock::new(Default::default);
+static IN_FLIGHT: LazyLock<Mutex<HashMap<String, SharedGet>>> = LazyLock::new(Default::default);
+/// One request, shared by everyone waiting for the same response.
+type SharedGet = Arc<OnceCell<Result<Value, ApiError>>>;
 
 /// One GET over the network, shared with any identical request already in flight.
 async fn fetch(path: &str, query: &[(&str, &str)]) -> Result<Value, ApiError> {

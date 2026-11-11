@@ -4,3 +4,5 @@ smoke*.png
 /vendor/*/target
 /scripts/icons/target
 /scripts/icons/Cargo.lock
+/scripts/bench-decode/target
+/scripts/bench-decode/Cargo.lock

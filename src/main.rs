@@ -266,7 +266,7 @@ pub fn hwnd(window: &slint::Window) -> Option<isize> {
 }
 
 #[cfg(feature = "smoke")]
-fn save_snapshot(window: &slint::Window, path: &str) -> Result<(), String> {
+pub fn save_snapshot(window: &slint::Window, path: &str) -> Result<(), String> {
     let buf = window.take_snapshot().map_err(|e| e.to_string())?;
     let file = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), buf.width(), buf.height());
@@ -280,7 +280,7 @@ fn save_snapshot(window: &slint::Window, path: &str) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "smoke"))]
-fn save_snapshot(_: &slint::Window, _: &str) -> Result<(), String> {
+pub fn save_snapshot(_: &slint::Window, _: &str) -> Result<(), String> {
     Ok(())
 }
 
@@ -508,12 +508,40 @@ fn apply_track(
     }
 
     let Some(url) = art_url else {
+        NOW_ART.with(|n| *n.borrow_mut() = None);
         for set in [Playback::set_art, Playback::set_bar_art, Playback::set_side_art, Playback::set_thumb_art, Playback::set_bg_art] {
             set(&pb, slint::Image::default());
         }
         return;
     };
+    NOW_ART.with(|n| *n.borrow_mut() = Some((url.clone(), seq)));
+    load_now_art(ui, rt, seq, url);
+}
+
+thread_local! {
+    /// The cover of the current track (url, track generation) and the scale factor it was last
+    /// decoded for (UI thread).
+    static NOW_ART: RefCell<Option<(String, u64)>> = const { RefCell::new(None) };
+    static NOW_ART_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
+/// The window's scale factor may have changed (first shown, moved to another monitor, zoom):
+/// decode the current cover again for the new pixel sizes. Cheap when nothing changed.
+pub fn recheck_now_art(ui: &MainWindow) {
+    if (NOW_ART_SCALE.with(|s| s.get()) - ui.window().scale_factor()).abs() < 0.01 {
+        return;
+    }
+    if let Some((url, seq)) = NOW_ART.with(|n| n.borrow().clone())
+        && TRACK_GEN.load(Ordering::Relaxed) == seq
+    {
+        load_now_art(ui, runtime(), seq, url);
+    }
+}
+
+/// Loads the now-playing cover at the sizes the window needs right now.
+fn load_now_art(ui: &MainWindow, rt: tokio::runtime::Handle, seq: u64, url: String) {
     let scale = ui.window().scale_factor();
+    NOW_ART_SCALE.with(|s| s.set(scale));
     // Two sizes of the cover. The small one serves the bar and queue (56), the overlay (60) and
     // the mini player (72), so it is decoded at the largest of those: no slot upscales it. The
     // large one is for the lyrics page and the side panel (up to 540).
@@ -740,6 +768,7 @@ async fn stream(ui: &slint::Weak<MainWindow>, rt: tokio::runtime::Handle) -> Res
                 let t2 = format!("{title} · {artist}");
                 let _ = ui.upgrade_in_event_loop(move |ui| {
                     ui.global::<Playback>().set_playing(now_playing);
+                    podcast::set_saving(&ui, now_playing);
                     thumbbar::set_playing(now_playing);
                     winint::set_now_playing(&t2, now_playing);
                     lyrics_view::on_position(position_ms, now_playing);
@@ -753,6 +782,7 @@ async fn stream(ui: &slint::Weak<MainWindow>, rt: tokio::runtime::Handle) -> Res
                 stats::on_playing(false);
                 let _ = ui.upgrade_in_event_loop(|ui| {
                     ui.global::<Playback>().set_playing(false);
+                    podcast::set_saving(&ui, false);
                     thumbbar::set_playing(false);
                     lyrics_view::on_stopped();
                 });
@@ -907,8 +937,69 @@ fn demo(ui: &MainWindow, rt: &tokio::runtime::Runtime) {
     schedule_shots(ui);
 }
 
+/// CADENCE_SWEEP="start_ms:rows:row_px:seconds:times" (test runs): scrolls the current page from
+/// top to bottom `times` times, `seconds` each, at 60 steps a second, and logs per sweep the
+/// longest gap between two steps (a stall of the UI thread shows up here) and the memory after.
+fn schedule_sweep(ui: &MainWindow) {
+    let spec = std::env::var("CADENCE_SWEEP").unwrap_or_default();
+    let v: Vec<f32> = spec.split(':').filter_map(|x| x.parse().ok()).collect();
+    let [start_ms, rows, row_px, seconds, times] = v[..] else { return };
+    let weak = ui.as_weak();
+    slint::Timer::single_shot(Duration::from_millis(start_ms as u64), move || {
+        let timer = slint::Timer::default();
+        let began = std::time::Instant::now();
+        let (mut last, mut worst, mut steps, mut sweep) = (began, 0u128, 0u32, 0u32);
+        let weak = weak.clone();
+        timer.start(slint::TimerMode::Repeated, Duration::from_millis(16), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if CADENCE_SWEEP_DONE.load(Ordering::Relaxed) {
+                return;
+            }
+            let b = ui.global::<Browse>();
+            let now = std::time::Instant::now();
+            worst = worst.max(now.duration_since(last).as_millis());
+            last = now;
+            steps += 1;
+            let t = began.elapsed().as_secs_f32() / seconds;
+            let done = t.floor() as u32;
+            let bottom = (rows * row_px - b.get_view_height()).max(0.0);
+            b.set_scroll_y(-(t.fract() * bottom));
+            if done > sweep {
+                let (ws, private) = mem::usage_mb();
+                let (entries, bytes) = art::cache_usage();
+                logln!(
+                    "sweep {done}: {steps} steps, longest gap {worst} ms, working set {ws:.1} MB, private {private:.1} MB, art cache {entries} images / {:.1} MB, art queue {:?}",
+                    bytes as f64 / 1048576.0,
+                    art::queue_len()
+                );
+                (sweep, worst, steps) = (done, 0, 0);
+                if done as f32 >= times {
+                    b.set_scroll_y(0.0);
+                    CADENCE_SWEEP_DONE.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+        // Runs until the process exits.
+        std::mem::forget(timer);
+    });
+}
+
+static CADENCE_SWEEP_DONE: AtomicBool = AtomicBool::new(false);
+
 /// CADENCE_SHOTS="ms:file.png,...": snapshots at those offsets, then quit (test builds).
 fn schedule_shots(ui: &MainWindow) {
+    schedule_sweep(ui);
+    // CADENCE_MINI_SHOT="ms:file.png": open the mini player and snapshot it (test builds).
+    if let Ok(spec) = std::env::var("CADENCE_MINI_SHOT")
+        && let Some((ms, file)) = spec.split_once(':')
+    {
+        let (weak, file) = (ui.as_weak(), file.to_string());
+        slint::Timer::single_shot(Duration::from_millis(ms.parse().unwrap_or(0)), move || {
+            if let Some(ui) = weak.upgrade() {
+                mini::test_shot(&ui, file.clone());
+            }
+        });
+    }
     let shots = std::env::var("CADENCE_SHOTS").unwrap_or_default();
     if shots.is_empty() {
         return;
@@ -1135,19 +1226,6 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     dialogs::init(&ui);
     settings::init(&ui);
-    // Podcasts: save the episode position every 15 s while playing.
-    let progress = slint::Timer::default();
-    {
-        let weak = ui.as_weak();
-        progress.start(slint::TimerMode::Repeated, Duration::from_secs(15), move || {
-            if let Some(ui) = weak.upgrade() {
-                let pb = ui.global::<Playback>();
-                if pb.get_is_episode() && pb.get_playing() {
-                    podcast::on_position(pb.get_position_ms().max(0) as u32);
-                }
-            }
-        });
-    }
     let weak = ui.as_weak();
     pb.on_track_menu(move |x, y| {
         if let Some(ui) = weak.upgrade() {
@@ -1168,6 +1246,14 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::{ElementState, MouseButton, WindowEvent}};
         ui.window().on_winit_window_event(|_, ev| {
+            if let WindowEvent::ScaleFactorChanged { .. } = ev {
+                // The new factor reaches Slint after this event: look again in a moment.
+                slint::Timer::single_shot(Duration::from_millis(100), || {
+                    if let Some(ui) = main_ui() {
+                        recheck_now_art(&ui);
+                    }
+                });
+            }
             if let WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } = ev {
                 match button {
                     MouseButton::Back => browse::back(),
@@ -1242,6 +1328,13 @@ fn main() -> Result<(), slint::PlatformError> {
     if !(minimized && prefs::bool_or("close_to_tray", false)) {
         ui.show()?;
         logln!("launch: window shown at +{} ms", since_start_ms());
+        // The scale factor is only known once the window exists.
+        let weak = ui.as_weak();
+        slint::Timer::single_shot(Duration::from_millis(50), move || {
+            if let Some(ui) = weak.upgrade() {
+                recheck_now_art(&ui);
+            }
+        });
         if minimized {
             ui.window().set_minimized(true);
         }
@@ -1250,7 +1343,6 @@ fn main() -> Result<(), slint::PlatformError> {
     let _ = ui.hide();
     winint::remove_tray();
     stats::flush();
-    drop(progress);
 
     // Remember where playback stopped, then disconnect the Connect device (waits at most 2 s).
     if is_local_active() {
