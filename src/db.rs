@@ -1,6 +1,6 @@
 //! On-disk store (`%APPDATA%\cadence\cadence.db`, SQLite). Everything that could grow with the
 //! library lives here and is queried on demand instead of being held in RAM: the library index,
-//! listening stats, search history, local files, episode progress, lyrics offsets, sidebar pins
+//! search history, local files, episode progress, lyrics offsets, sidebar pins
 //! and Cadence-local playlist folders. The page cache is capped at 512 KB.
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -50,11 +50,7 @@ CREATE TABLE IF NOT EXISTS library (
 CREATE INDEX IF NOT EXISTS library_kind ON library(kind, position);
 CREATE INDEX IF NOT EXISTS library_artist ON library(artist_uri);
 CREATE TABLE IF NOT EXISTS sync_state (kind TEXT PRIMARY KEY, synced_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS plays (
-    id INTEGER PRIMARY KEY, uri TEXT NOT NULL, title TEXT NOT NULL, artist TEXT NOT NULL,
-    artist_uri TEXT NOT NULL DEFAULT '', album TEXT NOT NULL, album_uri TEXT NOT NULL DEFAULT '',
-    ms INTEGER NOT NULL, at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS plays_at ON plays(at);
+DROP TABLE IF EXISTS plays;
 CREATE TABLE IF NOT EXISTS search_history (query TEXT PRIMARY KEY, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS local_tracks (
     path TEXT PRIMARY KEY, uri TEXT NOT NULL, title TEXT NOT NULL, artist TEXT NOT NULL,
@@ -216,86 +212,6 @@ pub fn liked_by_artist(artist_uri: &str) -> Vec<LibItem> {
 
 pub fn library_count(kind: &str) -> i64 {
     conn().query_row("SELECT COUNT(*) FROM library WHERE kind = ?1", params![kind], |r| r.get(0)).unwrap_or(0)
-}
-
-// ---------------------------------------------------------------------------------------------
-// Listening stats (Cadence's own plays only).
-
-pub struct Play<'a> {
-    pub uri: &'a str,
-    pub title: &'a str,
-    pub artist: &'a str,
-    pub artist_uri: &'a str,
-    pub album: &'a str,
-    pub album_uri: &'a str,
-    pub ms: i64,
-}
-
-pub fn record_play(p: &Play) {
-    let _ = conn().execute(
-        "INSERT INTO plays (uri, title, artist, artist_uri, album, album_uri, ms, at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-        params![p.uri, p.title, p.artist, p.artist_uri, p.album, p.album_uri, p.ms, now()],
-    );
-}
-
-#[derive(Clone, Debug)]
-pub struct Top {
-    pub key: String,
-    pub title: String,
-    pub subtitle: String,
-    pub plays: i64,
-    pub ms: i64,
-}
-
-/// Uris of the artists Cadence has played most (search ranking).
-pub fn top_artist_uris(limit: usize) -> Vec<String> {
-    let c = conn();
-    let Ok(mut st) = c.prepare("SELECT artist_uri FROM plays WHERE artist_uri != '' GROUP BY artist_uri ORDER BY COUNT(*) DESC LIMIT ?1") else {
-        return Vec::new();
-    };
-    st.query_map(params![limit as i64], |r| r.get(0)).map(|it| it.flatten().collect()).unwrap_or_default()
-}
-
-/// Top songs / artists / albums since `since` (unix seconds; 0 = all time).
-pub fn top(what: &str, since: i64, limit: usize) -> Vec<Top> {
-    let (key, title, sub) = match what {
-        "artists" => ("artist", "artist", "''"),
-        "albums" => ("album || '|' || artist", "album", "artist"),
-        _ => ("uri", "title", "artist"),
-    };
-    let sql = format!(
-        "SELECT {key}, MAX({title}), MAX({sub}), COUNT(*), SUM(ms) FROM plays WHERE at >= ?1 AND {title} != ''
-         GROUP BY {key} ORDER BY COUNT(*) DESC, SUM(ms) DESC LIMIT ?2"
-    );
-    let c = conn();
-    let Ok(mut st) = c.prepare(&sql) else { return Vec::new() };
-    st.query_map(params![since, limit as i64], |r| {
-        Ok(Top { key: r.get(0)?, title: r.get(1)?, subtitle: r.get(2)?, plays: r.get(3)?, ms: r.get(4)? })
-    })
-    .map(|it| it.flatten().collect())
-    .unwrap_or_default()
-}
-
-/// (plays, listening ms) since `since`.
-pub fn totals(since: i64) -> (i64, i64) {
-    conn()
-        .query_row("SELECT COUNT(*), COALESCE(SUM(ms), 0) FROM plays WHERE at >= ?1", params![since], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap_or((0, 0))
-}
-
-/// Most played track uris (Home "Most played" shelf, artist fallback).
-pub fn most_played_uris(artist_uri: Option<&str>, limit: usize) -> Vec<(String, String, String, i64)> {
-    let c = conn();
-    let sql = "SELECT uri, MAX(title), MAX(artist), COUNT(*) FROM plays WHERE (?1 = '' OR artist_uri = ?1)
-               GROUP BY uri ORDER BY COUNT(*) DESC LIMIT ?2";
-    let Ok(mut st) = c.prepare(sql) else { return Vec::new() };
-    st.query_map(params![artist_uri.unwrap_or(""), limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-        .map(|it| it.flatten().collect())
-        .unwrap_or_default()
-}
-
-pub fn clear_plays() {
-    let _ = conn().execute("DELETE FROM plays", []);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -506,7 +422,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn library_and_stats_round_trip() {
+    fn library_round_trip() {
         // Uses the real db path under a temp APPDATA.
         let dir = std::env::temp_dir().join(format!("cadence-db-test-{}", std::process::id()));
         unsafe { std::env::set_var("APPDATA", &dir) };
@@ -515,9 +431,6 @@ mod tests {
         assert!(library_contains("spotify:track:a"));
         assert_eq!(library_list("track", "son", "alpha", 10).len(), 1);
         assert_eq!(liked_by_artist("spotify:artist:x").len(), 1);
-        record_play(&Play { uri: "spotify:track:a", title: "Song", artist: "X", artist_uri: "", album: "Al", album_uri: "", ms: 60_000 });
-        assert_eq!(top("songs", 0, 5)[0].plays, 1);
-        assert_eq!(totals(0), (1, 60_000));
         history_add("abc");
         assert_eq!(history(), vec!["abc".to_string()]);
         set_lyrics_offset("spotify:track:a", -300);
@@ -525,7 +438,5 @@ mod tests {
         let f = folder_create("Mix");
         folder_put("spotify:playlist:p", Some(f));
         assert_eq!(folder_items(), vec![("spotify:playlist:p".to_string(), f)]);
-        clear_plays();
-        assert_eq!(totals(0).0, 0);
     }
 }

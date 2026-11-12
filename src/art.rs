@@ -633,7 +633,7 @@ pub fn karaoke_bg(r: u8, g: u8, b: u8) -> SharedPixelBuffer<Rgb8Pixel> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Local images (profile picture, playlist cover upload, local-file artwork).
+// Local images (playlist cover upload, local-file artwork).
 
 /// Decodes JPEG or PNG bytes to a square RGB image `px` wide (center crop, box downscale).
 pub fn decode_square(data: &[u8], px: u32) -> Option<SharedPixelBuffer<Rgb8Pixel>> {
@@ -681,17 +681,6 @@ pub fn decode_square(data: &[u8], px: u32) -> Option<SharedPixelBuffer<Rgb8Pixel
         }
     }
     Some(out)
-}
-
-/// A square PNG copy of an image file (profile picture).
-pub fn save_square_png(src: &std::path::Path, dst: &std::path::Path, px: u32) -> bool {
-    let Ok(data) = std::fs::read(src) else { return false };
-    let Some(img) = decode_square(&data, px) else { return false };
-    let Ok(file) = std::fs::File::create(dst) else { return false };
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), img.width(), img.height());
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().and_then(|mut w| w.write_image_data(img.as_bytes())).is_ok()
 }
 
 /// A playlist cover from an image file: square JPEG under Spotify's 256 KB limit (as base64,

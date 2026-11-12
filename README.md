@@ -40,7 +40,7 @@ Grab `cadence.exe` from the [latest release](https://github.com/yoshik08/cadence
 - Sleep timer with fade-out, including "end of this track"
 
 **Library and browsing**
-- Home with Recently played, your playlists, Liked Songs, albums, new releases from artists you follow, podcasts and your most played; reorder or hide sections
+- Home with Recently played, your playlists, Liked Songs, albums, new releases from artists you follow, podcasts; reorder or hide sections
 - Your Library with tabs, search and sort; sidebar with filter, pinned playlists and Cadence-local folders
 - Playlist pages: edit name, description and cover, public / private, collaborative, delete, sortable columns (remembered), duplicate finder, add songs from search, CSV export
 - Album, artist (popular tracks, discography filters, follow, your liked songs) and podcast pages
@@ -55,11 +55,7 @@ Grab `cadence.exe` from the [latest release](https://github.com/yoshik08/cadence
 
 **Lyrics**
 - Lyrics page in the yoshik.xyz design with word-synced lines, plus a Now Playing side panel with synced lyrics
-- Per-song lyrics timing offset (Â±0.1 s steps), saved per track
-
-**Yours, on this PC**
-- Listening stats (top songs, artists, albums, listening time) counted from Cadence's own plays; private session pauses recording
-- A small local Cadence profile (name, picture, bio)
+- Per-song lyrics timing offset (±0.1 s steps), saved per track
 
 ## Requirements
 
@@ -132,7 +128,7 @@ Karaoke mode (Apple Music syllable timings) is a personal-build feature: `cargo 
 
 Two librespot crates are vendored with small, marked patches (`vendor/*/CADENCE_PATCH.md`): queue editing for the local client, and local files at any sample rate in more formats.
 
-Your library index, listening stats, search history, local files and podcast progress live in a local SQLite database next to your settings. Caches (`audio`, `art`, `lyrics`, `api`) are each size-capped and pruned oldest-first at startup; Settings > Storage shows and clears them.
+Your library index, search history, local files and podcast progress live in a local SQLite database next to your settings. Caches (`audio`, `art`, `lyrics`, `api`) are each size-capped and pruned oldest-first at startup; Settings > Storage shows and clears them.
 
 ## Memory
 
@@ -152,7 +148,7 @@ Playback, release build, 10 min with the library open and a playlist playing (9 
 
 - New Spotify apps start in Development Mode. They are capped to a small allowlist of users until extended quota mode is approved. The cap was 25 users, and Spotify cut it to 5 for apps created after February 2026. The app owner needs Premium.
 - Development Mode also hides the track lists of playlists you don't own (the header shows and Play still works), and search returns at most 10 results per type. Spotify removed artist top tracks, recommendations, new releases, editorial playlists and audio features for new apps; Cadence gets popular tracks through librespot when it can, and otherwise says so and shows your own top tracks for that artist.
-- Not available to apps: Lossless, downloads, Jam, Canvas, friends activity, user search and editing your Spotify profile. Playlist folders and the profile in Cadence are local to your PC and labelled that way.
+- Not available to apps: Lossless, downloads, Jam, Canvas, friends activity, user search and editing your Spotify profile. Playlist folders in Cadence are local to your PC and labelled that way.
 
 ## Legal
 

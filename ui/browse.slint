@@ -23,16 +23,8 @@ export struct SideItem {
     art: image,
 }
 
-export struct StatRow {
-    rank: int,
-    title: string,
-    subtitle: string,
-    value: string,
-    uri: string,
-}
-
 export global Browse {
-    // Navigation. `page`: home | search | library | list | artist | stats | profile | settings.
+    // Navigation. `page`: home | search | library | list | artist | settings.
     in-out property <string> page: "home";
     // A newer Cadence is available: the Settings button gets a dot.
     in property <bool> update-available;
@@ -168,21 +160,6 @@ export global Browse {
     callback toggle-follow();
     callback open-artist-liked();
 
-    // Stats
-    in-out property <string> stats-range: "4w";
-    in property <string> stats-summary;
-    in property <[StatRow]> stat-songs;
-    in property <[StatRow]> stat-artists;
-    in property <[StatRow]> stat-albums;
-    callback stats-changed();
-    callback stats-clear();
-
-    // Profile (Cadence-local)
-    in-out property <string> profile-name;
-    in-out property <string> profile-bio;
-    in property <image> profile-pic;
-    callback profile-save();
-    callback profile-pick();
 }
 
 // --------------------------------------------------------------------------------------------
@@ -390,8 +367,6 @@ export component Sidebar inherits Rectangle {
             height: Tokens.control-md;
             spacing: Tokens.space-xs;
             alignment: start;
-            IconButton { round: true; icon: Icons.chart; clicked => { Browse.go("stats"); } }
-            IconButton { round: true; icon: Icons.user; clicked => { Browse.go("profile"); } }
             IconButton { round: true; icon: Icons.gear; active: Browse.update-available; clicked => { Browse.go("settings"); } }
         }
     }
@@ -1187,100 +1162,6 @@ component ArtistPage inherits PageFade {
     }
 }
 
-component StatList inherits VerticalLayout {
-    in property <string> title;
-    in property <[StatRow]> rows;
-    property <length> rank-width: 28px;
-    property <length> value-width: 76px;
-    spacing: 0;
-    horizontal-stretch: 1;
-    SectionHeader { title: root.title; inset: 0px; }
-    if root.rows.length == 0 : Caption { text: "Nothing yet."; height: Tokens.control-sm; }
-    for r in root.rows : Rectangle {
-        height: Tokens.control-lg;
-        ListRow {
-            hovered: ta.has-hover && r.uri != "";
-            pressed: ta.pressed && r.uri != "";
-        }
-        Label { x: Tokens.space-xs; width: root.rank-width; height: parent.height; vertical-alignment: center; text: "\{r.rank}"; color: Tokens.text-tertiary; }
-        VerticalLayout {
-            x: Tokens.space-xs + root.rank-width + Tokens.space-xs;
-            width: parent.width - self.x - root.value-width - Tokens.space-xs;
-            alignment: center;
-            Label { text: r.title; font-weight: Tokens.weight-medium; }
-            if r.subtitle != "" : Caption { text: r.subtitle; }
-        }
-        Caption { x: parent.width - root.value-width - Tokens.space-xs; width: root.value-width; height: parent.height; vertical-alignment: center; horizontal-alignment: right; text: r.value; }
-        ta := TouchArea { clicked => { if (r.uri != "") { Browse.open(r.uri); } } }
-    }
-}
-
-component StatsPage inherits PageFade {
-    ScrollView {
-        content-y <=> Browse.scroll-y;
-        VerticalLayout {
-            alignment: start;
-            PageTitle { title: "Listening stats"; status: "Counts only what Cadence played on this PC. Private session pauses recording."; }
-            HorizontalLayout {
-                padding-left: Tokens.page-margin;
-                padding-right: Tokens.page-margin;
-                spacing: Tokens.space-sm;
-                height: Tokens.control-sm;
-                Chip { text: "4 weeks"; selected: Browse.stats-range == "4w"; clicked => { Browse.stats-range = "4w"; Browse.stats-changed(); } }
-                Chip { text: "6 months"; selected: Browse.stats-range == "6m"; clicked => { Browse.stats-range = "6m"; Browse.stats-changed(); } }
-                Chip { text: "All time"; selected: Browse.stats-range == "all"; clicked => { Browse.stats-range = "all"; Browse.stats-changed(); } }
-                Rectangle { horizontal-stretch: 1; }
-                Button { size: Tokens.control-sm; text: "Clear listening history"; clicked => { Browse.stats-clear(); } }
-            }
-            HorizontalLayout {
-                padding: Tokens.page-margin;
-                padding-bottom: Tokens.space-md;
-                Label { text: Browse.stats-summary; font-size: Tokens.size-heading; }
-            }
-            HorizontalLayout {
-                padding-left: Tokens.page-margin;
-                padding-right: Tokens.page-margin;
-                padding-bottom: Tokens.page-margin;
-                spacing: Tokens.space-2xl;
-                alignment: stretch;
-                StatList { title: "Top songs"; rows: Browse.stat-songs; }
-                StatList { title: "Top artists"; rows: Browse.stat-artists; }
-                StatList { title: "Top albums"; rows: Browse.stat-albums; }
-            }
-        }
-    }
-}
-
-component ProfilePage inherits PageFade {
-    property <length> form-width: 420px;
-    property <length> bio-height: 120px;
-    VerticalLayout {
-        PageTitle { title: "Cadence profile"; status: "Stored only on this PC. Spotify doesn't let apps edit your Spotify profile."; }
-        HorizontalLayout {
-            padding: Tokens.page-margin;
-            spacing: Tokens.space-2xl;
-            alignment: start;
-            VerticalLayout {
-                spacing: Tokens.space-md;
-                ArtTile { width: Tokens.art-card; height: Tokens.art-card; radius: Tokens.art-card / 2; source: Browse.profile-pic; fade: false; }
-                Button { size: Tokens.control-md; text: "Choose picture…"; clicked => { Browse.profile-pick(); } }
-            }
-            VerticalLayout {
-                width: root.form-width;
-                spacing: Tokens.space-sm;
-                Caption { text: "Display name"; }
-                Field { text <=> Browse.profile-name; placeholder: "Your name"; }
-                Rectangle { height: Tokens.space-sm; }
-                Caption { text: "Bio"; }
-                Field { height: root.bio-height; single-line: false; text <=> Browse.profile-bio; placeholder: "A few words"; }
-                Rectangle { height: Tokens.space-md; }
-                HorizontalLayout { alignment: start; Button { kind: "primary"; text: "Save"; clicked => { Browse.profile-save(); } } }
-            }
-        }
-        Rectangle { vertical-stretch: 1; }
-    }
-}
-
 // Fills its parent; the bottom belongs to the now-playing bar.
 export component BrowseArea inherits Rectangle {
     background: Tokens.bg-base;
@@ -1305,8 +1186,6 @@ export component BrowseArea inherits Rectangle {
         if Browse.page == "list" && Browse.flip : ListPage { }
         if Browse.page == "artist" && !Browse.flip : ArtistPage { }
         if Browse.page == "artist" && Browse.flip : ArtistPage { }
-        if Browse.page == "stats" : StatsPage { }
-        if Browse.page == "profile" : ProfilePage { }
         @children
     }
     if Browse.error != "" : Label {

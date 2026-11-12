@@ -29,17 +29,17 @@ Memory check: release build, `CADENCE_MEM=1` or `scripts/measure.ps1`.
 - [~] 3.6 Search: mixed results, Top result, Show all with paging, history (SQLite), paste-a-link (field and Ctrl+V anywhere), arrow keys / Enter / Escape, states. Needs sign-in for results.
 - [~] 3.7 Album page: header, Save, explicit badges, per-track hearts, Now Playing + lyrics panel. Needs sign-in.
 - [x] 3.8 Artist page: Popular via librespot artist metadata (verified live, works signed out), honest local fallback, name / photo fallback from librespot, Follow, discography with filters and Load more, "You liked N songs". Discography and follow need sign-in.
-- [~] 3.9 Home: greeting, Recently played, Your playlists, Liked Songs, albums, new releases from followed artists, podcasts, Most played (local), skeletons, hover play, art-tinted background, reorder / hide. Made For You: not reachable without unofficial hub APIs, left out. Needs sign-in.
+- [~] 3.9 Home: greeting, Recently played, Your playlists, Liked Songs, albums, new releases from followed artists, podcasts, skeletons, hover play, art-tinted background, reorder / hide. Made For You: not reachable without unofficial hub APIs, left out. Needs sign-in.
 - [x] 3.10 Podcasts: episodes play through librespot (verified), speed 0.5–2× via WSOLA time-stretch (verified: 2× doubles progress), resume, progress saving, mark played (SQLite). Show pages / follow need sign-in.
 - [x] 3.11 Router: back / forward (buttons, Alt+arrows, mouse side buttons), history, scroll restoration, link handling. Verified page switching; mouse buttons not exercised.
-- [~] 3.12 Settings: everything listed in the prompt that can work (quality, normalize + level, gapless, autoplay, mono, EQ with presets, explicit filter, shuffle style, output device, zoom, compact, panel on play, notifications, overlay, start with Windows, close to tray, hotkeys, Bluetooth / lock pause, cache size / clear / open, proxy, hardware acceleration, local files, private session, language note, re-authorize, account link, memory readout, debug log). Page verified; restart-bound settings need a restart.
+- [~] 3.12 Settings: everything listed in the prompt that can work (quality, normalize + level, gapless, autoplay, mono, EQ with presets, explicit filter, shuffle style, output device, zoom, compact, panel on play, notifications, overlay, start with Windows, close to tray, hotkeys, Bluetooth / lock pause, cache size / clear / open, proxy, hardware acceleration, local files, language note, re-authorize, account link, memory readout, debug log). Page verified; restart-bound settings need a restart.
 - [~] 3.13 Windows: tray with controls + audio output switcher, close to tray, start with Windows (Run key), native file dialogs, global hotkeys, mini player, media-key overlay. Not exercised (would take focus).
 - [x] 3.14 Lyrics: per-song offset (±0.1 s, SQLite) on the lyrics page and side panel; Now Playing + lyrics panel on artist and album pages (verified).
 - [~] 3.15 Sleep timer: presets, end of track, custom, 15 s fade, pause (not disconnect), restore volume, skip cancels end-of-track. Logic reviewed, not timed live.
 - [~] 3.16 QoL: pause on Bluetooth disconnect / resume on reconnect, pause on lock, resume after restart (verified), copy now playing, CSV export.
 - [x] 3.17 Local files: scan, tags, SQLite index, change watching, missing detection, playback through librespot (patched for any sample rate, WAV / AAC / M4A / Ogg); verified with a generated WAV. Embedded artwork code not exercised (test file had none).
-- [~] 3.18 Local stats: plays recorded (30 s or half), top songs / artists / albums, time, ranges, clear, private session. Recording logic unit-tested via db test.
-- [x] 3.19 Local Cadence profile, clearly labelled (page verified).
+- [x] 3.18 Local stats: removed in 1.5 at the user's request (page, play recording, plays table, private session, Most played shelf).
+- [x] 3.19 Local Cadence profile: removed in 1.5 at the user's request (page, profile.png and its settings are deleted on start).
 
 ## Measurements (v1.4 release, signed-out test run, queue panel open, playing)
 

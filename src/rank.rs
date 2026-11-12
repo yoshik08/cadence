@@ -45,17 +45,13 @@ pub struct Album {
 pub struct Personal {
     /// Liked Songs.
     pub liked: HashSet<String>,
-    /// Tracks in Cadence's play history.
-    pub played: HashSet<String>,
     /// Followed artists.
     pub followed: HashSet<String>,
-    /// Artists the user plays often (Cadence's history).
-    pub frequent: HashSet<String>,
 }
 
 impl Personal {
     fn knows_artist(&self, uri: &str) -> bool {
-        self.followed.contains(uri) || self.frequent.contains(uri)
+        self.followed.contains(uri)
     }
 }
 
@@ -86,7 +82,6 @@ const TEXT_EXACT: f32 = 12.0;
 const TEXT_PREFIX: f32 = 8.0;
 const TEXT_WORDS: f32 = 5.0;
 const LIKED: f32 = 20.0;
-const PLAYED: f32 = 14.0;
 const ARTIST_KNOWN: f32 = 10.0;
 const VERSION_PENALTY: f32 = 30.0;
 const COMPILATION_PENALTY: f32 = 6.0;
@@ -163,9 +158,6 @@ fn song_score(s: &Song, position: usize, query: &str, me: &Personal) -> f32 {
     let mut score = popularity_signal(s.popularity, position) + text_boost(&s.title, query);
     if me.liked.contains(&s.uri) {
         score += LIKED;
-    }
-    if me.played.contains(&s.uri) {
-        score += PLAYED;
     }
     if s.artist_uris.iter().any(|a| me.knows_artist(a)) {
         score += ARTIST_KNOWN;

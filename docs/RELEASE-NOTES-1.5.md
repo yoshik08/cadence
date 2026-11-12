@@ -11,6 +11,7 @@
 - **Playlists search.** Search your playlists right from the sidebar.
 - **Smart Autoplay.** When an album, playlist or your queue ends, Cadence keeps playing similar songs, and the player bar shows "Autoplaying similar songs". Turn it off in Settings > Playback.
 - **In-app first-time setup.** A setup screen walks you through creating your Spotify app and pasting your Client ID, with a Copy button for the redirect address. No files or settings to edit by hand.
+- **Listening stats and the Cadence profile are gone.** Both pages, the Most played shelf and the Private session switch are removed, and Cadence deletes the play history and profile it stored on your PC. Artist pages fall back to your Liked Songs when Spotify's popular tracks aren't available.
 - **Auto-updates.** Settings > Updates tells you when a new version is out and installs it with one click, now or on the next restart. Your Client ID, sign-in and settings are kept.
 
 ## Updating from 1.4

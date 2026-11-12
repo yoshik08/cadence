@@ -33,6 +33,22 @@ pub fn set(key: &str, value: Value) {
         return;
     }
     s.insert(key.to_string(), value);
+    save(s);
+}
+
+/// Deletes keys that are no longer used (no write when none are present).
+pub fn remove(keys: &[&str]) {
+    let mut s = store();
+    let before = s.len();
+    for k in keys {
+        s.remove(*k);
+    }
+    if s.len() != before {
+        save(s);
+    }
+}
+
+fn save(s: MutexGuard<'static, Map<String, Value>>) {
     let text = Value::Object(s.clone()).to_string();
     drop(s);
     let p = path();

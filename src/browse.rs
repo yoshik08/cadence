@@ -1,17 +1,17 @@
 //! Browse: the router (back / forward with scroll restoration), every page, and the sidebar.
 //!
 //! Pages: home, search, library, list (playlist / album / Liked Songs / podcast / local files /
-//! local folder / "show all" / an artist's liked songs), artist, stats, profile, settings.
+//! local folder / "show all" / an artist's liked songs), artist, settings.
 //! Async results carry the PAGE value they started under and are dropped when it moved, so a
 //! slow response never lands on the wrong page. Page data is freed on navigation.
 
 use crate::api::{self, CardData, Source, TrackData, arr, n, s};
 use crate::art::{self, Priority, SpImage};
 use crate::db;
-use crate::{Browse, Card, MainWindow, Playback, ShelfData, SideItem, StatRow, Song};
+use crate::{Browse, Card, MainWindow, Playback, ShelfData, SideItem, Song};
 use reqwest::Method;
 use serde_json::{Value, json};
-use slint::{ComponentHandle, Image, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel, Weak};
+use slint::{ComponentHandle, Image, Model, ModelNotify, ModelTracker, SharedString, VecModel, Weak};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -690,7 +690,7 @@ fn new_page(ui: &MainWindow, page: &str, status: &str) -> u64 {
 // ---------------------------------------------------------------------------------------------
 // Router.
 
-/// Navigates to a route: "home", "search", "library", "stats", "profile", "settings",
+/// Navigates to a route: "home", "search", "library", "settings",
 /// "showall:<kind>:<query>", "local", "folder:<id>", "artist-liked:<uri>", or a Spotify uri.
 pub fn go(route: &str) {
     if let Some(track) = route.strip_prefix("recent:") {
@@ -780,8 +780,6 @@ fn show(ui: &MainWindow, route: &str, scroll: f32) {
         "home" => go_home(ui),
         "search" => go_search(ui),
         "library" => go_library(ui),
-        "stats" => go_stats(ui),
-        "profile" => go_profile(ui),
         "settings" => {
             new_page(ui, "settings", "");
             finish(&b);
@@ -819,14 +817,13 @@ pub fn open_link(text: &str) -> bool {
 // ---------------------------------------------------------------------------------------------
 // Home.
 
-const HOME_SECTIONS: [(&str, &str); 7] = [
+const HOME_SECTIONS: [(&str, &str); 6] = [
     ("recent", "Recently played"),
     ("playlists", "Your playlists"),
     ("liked", "Liked Songs"),
     ("albums", "Your albums"),
     ("releases", "New from artists you follow"),
     ("shows", "Your podcasts"),
-    ("mostplayed", "Most played in Cadence"),
 ];
 
 /// Section order and hidden flags from settings.
@@ -968,7 +965,6 @@ fn go_home(ui: &MainWindow) {
         finish(&b);
         b.set_skeleton(false);
         b.set_status("Sign in to Spotify to load your library. Cadence asks when it starts.".into());
-        load_home_local(g);
         return;
     }
     refresh_home(g, true);
@@ -1083,9 +1079,6 @@ async fn home_data(src: Source) -> HomeData {
     if want("releases") {
         filled.insert("releases".into(), (new_releases(src).await, String::new(), String::new()));
     }
-    if want("mostplayed") {
-        filled.insert("mostplayed".into(), most_played_cards().await);
-    }
     HomeData { name, filled, error, recent }
 }
 
@@ -1155,20 +1148,6 @@ fn play_recent(ui: &MainWindow, track: &str) {
     }
 }
 
-/// Home without Spotify sign-in: only Cadence's own data.
-fn load_home_local(g: u64) {
-    let w = weak();
-    crate::runtime().spawn(async move {
-        let mut filled = HashMap::new();
-        filled.insert("mostplayed".to_string(), most_played_cards().await);
-        let _ = w.upgrade_in_event_loop(move |ui| {
-            if PAGE.load(Relaxed) == g {
-                set_shelves(&ui, &filled, g);
-            }
-        });
-    });
-}
-
 /// Releases from followed artists in the last 120 days, newest first (artist albums endpoint;
 /// Spotify has no batch form of it, so the requests run four at a time).
 async fn new_releases(src: Source) -> Vec<CardData> {
@@ -1208,19 +1187,6 @@ fn days_ago_date(days: i64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     format!("{y:04}-{m:02}-{d:02}")
-}
-
-async fn most_played_cards() -> (Vec<CardData>, String, String) {
-    let top = tokio::task::spawn_blocking(|| db::most_played_uris(None, 12)).await.unwrap_or_default();
-    if top.is_empty() {
-        return (Vec::new(), "Songs you play in Cadence show up here (counted on this PC only).".into(), String::new());
-    }
-    let mut cards = Vec::new();
-    for (uri, title, artist, plays) in top {
-        let art_url = if uri.starts_with("spotify:") { crate::queue::player_meta(&uri).await.and_then(|m| m.art_url).unwrap_or_default() } else { String::new() };
-        cards.push(CardData { title, subtitle: format!("{artist} · {plays} plays"), uri, art_url, kind: "track".into(), ..Default::default() });
-    }
-    (cards, String::new(), "stats".into())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1315,15 +1281,13 @@ pub fn test_search(query: &str, response_file: &str) {
 /// Pause in typing before a search goes out.
 const SEARCH_DEBOUNCE_MS: u64 = 250;
 
-/// Local signals for search ranking: Liked Songs, Cadence's play history, followed artists and
-/// the artists played most. All from the local database; nothing is requested.
+/// Local signals for search ranking: Liked Songs and followed artists, from the local library
+/// index; nothing is requested.
 fn personal() -> crate::rank::Personal {
     let uris = |items: Vec<db::LibItem>| items.into_iter().map(|l| l.uri).collect();
     crate::rank::Personal {
         liked: uris(db::library_list("track", "", "recent", 20_000)),
-        played: db::most_played_uris(None, 500).into_iter().map(|p| p.0).collect(),
         followed: uris(db::library_list("artist", "", "recent", 5000)),
-        frequent: db::top_artist_uris(50).into_iter().collect(),
     }
 }
 
@@ -2362,7 +2326,7 @@ fn open_artist(ui: &MainWindow, uri: &str) {
 }
 
 /// Popular tracks through librespot's artist metadata (unofficial, may fail), else an honest
-/// local fallback from Cadence's own plays and Liked Songs.
+/// local fallback from Liked Songs.
 async fn popular_tracks(artist_uri: &str) -> (Vec<TrackData>, String, String) {
     if let Some(p) = crate::PLAYER.get().cloned()
         && let Some(uris) = p.artist_top_tracks(artist_uri).await
@@ -2389,25 +2353,18 @@ async fn popular_tracks(artist_uri: &str) -> (Vec<TrackData>, String, String) {
         }
     }
     let a = artist_uri.to_string();
-    let (played, liked) = tokio::task::spawn_blocking(move || (db::most_played_uris(Some(&a), 10), db::liked_by_artist(&a))).await.unwrap_or_default();
-    let mut rows: Vec<TrackData> = Vec::new();
-    for (uri, title, artist, _) in played {
-        rows.push(TrackData { title, artist, uri, ..Default::default() });
-    }
-    for l in liked {
-        if rows.len() >= 10 {
-            break;
-        }
-        if !rows.iter().any(|r| r.uri == l.uri) {
-            rows.push(TrackData { images: lib_images(&l), title: l.title, artist: l.artist, album: l.album, duration_ms: l.duration_ms as u64, explicit: l.explicit, uri: l.uri, ..Default::default() });
-        }
-    }
+    let liked = tokio::task::spawn_blocking(move || db::liked_by_artist(&a)).await.unwrap_or_default();
+    let rows: Vec<TrackData> = liked
+        .into_iter()
+        .take(10)
+        .map(|l| TrackData { images: lib_images(&l), title: l.title, artist: l.artist, album: l.album, duration_ms: l.duration_ms as u64, explicit: l.explicit, uri: l.uri, ..Default::default() })
+        .collect();
     let note = if rows.is_empty() {
-        "Spotify's popular tracks aren't available to Cadence right now, and you haven't played or liked this artist yet.".to_string()
+        "Spotify's popular tracks aren't available to Cadence right now, and you haven't liked any songs by this artist yet.".to_string()
     } else {
-        "Spotify's popular tracks aren't available to Cadence right now. These come from your Cadence plays and Liked Songs.".to_string()
+        "Spotify's popular tracks aren't available to Cadence right now. These are from your Liked Songs.".to_string()
     };
-    (rows, "Your top tracks".into(), note)
+    (rows, "Your liked songs".into(), note)
 }
 
 fn apply_disc(ui: &MainWindow, g: u64) {
@@ -2418,62 +2375,6 @@ fn apply_disc(ui: &MainWindow, g: u64) {
     let model = with_models(|m| m.disc.clone());
     patch_model(&model, card_rows(&model, &cards));
     load_cards_art(&model, &cards, 160.0, g);
-}
-
-// ---------------------------------------------------------------------------------------------
-// Stats and profile.
-
-fn go_stats(ui: &MainWindow) {
-    new_page(ui, "stats", "");
-    finish(&ui.global::<Browse>());
-    fill_stats(ui);
-}
-
-fn fill_stats(ui: &MainWindow) {
-    let b = ui.global::<Browse>();
-    let since = match b.get_stats_range().as_str() {
-        "4w" => db::now() - 28 * 86_400,
-        "6m" => db::now() - 182 * 86_400,
-        _ => 0,
-    };
-    let (plays, ms) = db::totals(since);
-    b.set_stats_summary(format!("{plays} plays · {} listened", api::long_duration(ms as u64)).into());
-    let rows = |what: &str| -> Vec<StatRow> {
-        db::top(what, since, 10)
-            .into_iter()
-            .enumerate()
-            .map(|(i, t)| StatRow {
-                rank: i as i32 + 1,
-                title: t.title.into(),
-                subtitle: if t.subtitle.is_empty() { api::long_duration(t.ms as u64).into() } else { format!("{} · {}", t.subtitle, api::long_duration(t.ms as u64)).into() },
-                value: format!("{} plays", t.plays).into(),
-                // listening time in the subtitle for artists
-
-                uri: if what == "songs" && t.key.starts_with("spotify:track:") { t.key.into() } else { "".into() },
-            })
-            .collect()
-    };
-    b.set_stat_songs(ModelRc::new(VecModel::from(rows("songs"))));
-    b.set_stat_artists(ModelRc::new(VecModel::from(rows("artists"))));
-    b.set_stat_albums(ModelRc::new(VecModel::from(rows("albums"))));
-}
-
-fn go_profile(ui: &MainWindow) {
-    new_page(ui, "profile", "");
-    let b = ui.global::<Browse>();
-    finish(&b);
-    let p = crate::prefs::get("profile");
-    b.set_profile_name(s(&p["name"]).into());
-    b.set_profile_bio(s(&p["bio"]).into());
-    b.set_profile_pic(load_profile_pic());
-}
-
-fn profile_pic_path() -> std::path::PathBuf {
-    crate::auth::data_dir().join("profile.png")
-}
-
-fn load_profile_pic() -> Image {
-    Image::load_from_path(&profile_pic_path()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2572,8 +2473,7 @@ fn play_all(ui: &MainWindow, uri: &str, shuffle: bool) {
     crate::with_player(|p| {
         if shuffle_on && fewer && !rows.is_empty() {
             p.set_shuffle(true);
-            let recent = db::most_played_uris(None, 0);
-            let order = fewer_repeats(&rows, &recent.into_iter().map(|r| r.0).collect::<HashSet<_>>());
+            let order = fewer_repeats(&rows);
             p.play_list(&order, 0, Some(false));
         } else if (filtered || uri == "local" || uri.starts_with("artist-liked:")) && !rows.is_empty() {
             let uris: Vec<String> = rows.iter().map(|r| r.uri.clone()).collect();
@@ -2590,19 +2490,14 @@ fn play_all(ui: &MainWindow, uri: &str, shuffle: bool) {
     });
 }
 
-/// "Fewer repeats" shuffle: songs of one artist spread apart, recently played ones last.
-pub fn fewer_repeats(rows: &[TrackData], recent: &HashSet<String>) -> Vec<String> {
+/// "Fewer repeats" shuffle: songs of one artist spread apart.
+pub fn fewer_repeats(rows: &[TrackData]) -> Vec<String> {
     let mut groups: HashMap<String, Vec<String>> = HashMap::new();
-    let mut late: Vec<String> = Vec::new();
     for r in rows {
         if r.uri.is_empty() || r.unavailable {
             continue;
         }
-        if recent.contains(&r.uri) {
-            late.push(r.uri.clone());
-        } else {
-            groups.entry(r.artist.clone()).or_default().push(r.uri.clone());
-        }
+        groups.entry(r.artist.clone()).or_default().push(r.uri.clone());
     }
     // Next song: the artist with the most songs left (ties random), unless that would make a
     // run longer than unavoidable, ceil(biggest / (others + 1)).
@@ -2629,8 +2524,6 @@ pub fn fewer_repeats(rows: &[TrackData], recent: &HashSet<String>) -> Vec<String
             run = 1;
         }
     }
-    shuffle_vec(&mut late);
-    out.extend(late);
     out
 }
 
@@ -3155,46 +3048,6 @@ pub fn init(ui: &MainWindow) {
             ui.global::<Browse>().set_home_editing(true);
         }
     });
-    let w = ui.as_weak();
-    b.on_stats_changed(move || {
-        if let Some(ui) = w.upgrade() {
-            fill_stats(&ui);
-        }
-    });
-    let w = ui.as_weak();
-    b.on_stats_clear(move || {
-        if let Some(ui) = w.upgrade() {
-            crate::dialogs::confirm(&ui, "Clear listening history?", "This deletes every play Cadence recorded on this PC. It doesn't affect Spotify.", "Clear", true, |ui| {
-                db::clear_plays();
-                fill_stats(ui);
-                crate::menu::toast_text(ui, "Listening history cleared");
-            });
-        }
-    });
-    let w = ui.as_weak();
-    b.on_profile_save(move || {
-        if let Some(ui) = w.upgrade() {
-            let b = ui.global::<Browse>();
-            crate::prefs::set("profile", json!({ "name": b.get_profile_name().as_str(), "bio": b.get_profile_bio().as_str() }));
-            crate::menu::toast_text(&ui, "Profile saved on this PC");
-        }
-    });
-    let w = ui.as_weak();
-    b.on_profile_pick(move || {
-        let w = w.clone();
-        crate::winint::pick_file("Choose a profile picture", &[("Images", "*.jpg;*.jpeg;*.png")], move |path| {
-            std::thread::spawn(move || {
-                let ok = crate::art::save_square_png(&path, &profile_pic_path(), 256);
-                let _ = w.upgrade_in_event_loop(move |ui| {
-                    if ok {
-                        ui.global::<Browse>().set_profile_pic(load_profile_pic());
-                    } else {
-                        crate::menu::toast_text(&ui, "Couldn't read that image");
-                    }
-                });
-            });
-        });
-    });
 
     fill_sidebar(ui);
     NAV.with(|n| *n.borrow_mut() = (vec![("home".into(), 0.0)], 0));
@@ -3238,7 +3091,7 @@ pub fn on_web_ready() {
     }
     match b.get_page().as_str() {
         "home" => refresh_home(PAGE.load(Relaxed), false),
-        "settings" | "stats" | "profile" => {}
+        "settings" => {}
         _ => reload(),
     }
     // Library index: sync in the background, then refresh the sidebar and the library page.
@@ -3329,21 +3182,19 @@ mod tests {
         let rows: Vec<TrackData> = (0..9)
             .map(|i| TrackData { uri: format!("u{i}"), artist: if i < 6 { "A".into() } else { format!("B{i}") }, ..Default::default() })
             .collect();
-        let order = fewer_repeats(&rows, &HashSet::new());
+        let order = fewer_repeats(&rows);
         assert_eq!(order.len(), 9);
         let artist = |u: &str| rows.iter().find(|r| r.uri == u).unwrap().artist.clone();
         // 6 of 9 by A: neighbours are unavoidable, but A is spread out (never 4 in a row),
         // and two artists with equal counts alternate.
         for _ in 0..50 {
-            let order = fewer_repeats(&rows, &HashSet::new());
+            let order = fewer_repeats(&rows);
             assert!(order.windows(4).all(|w| !w.iter().all(|u| artist(u) == "A")));
         }
         let even: Vec<TrackData> = (0..8).map(|i| TrackData { uri: format!("e{i}"), artist: if i % 2 == 0 { "X".into() } else { "Y".into() }, ..Default::default() }).collect();
-        let o = fewer_repeats(&even, &HashSet::new());
+        let o = fewer_repeats(&even);
         let a2 = |u: &str| even.iter().find(|r| r.uri == u).unwrap().artist.clone();
         assert!(o.windows(3).all(|w| !(a2(&w[0]) == a2(&w[1]) && a2(&w[1]) == a2(&w[2]))));
-        let recent: HashSet<String> = ["u0".to_string()].into();
-        assert_eq!(fewer_repeats(&rows, &recent).last().map(String::as_str), Some("u0"));
     }
 
     #[test]

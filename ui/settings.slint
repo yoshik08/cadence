@@ -41,8 +41,7 @@ export global Settings {
     in-out property <bool> gpu: true;
     in-out property <bool> show-local;
     in property <[string]> local-folders;
-    // Privacy and account
-    in-out property <bool> private-session;
+    // Account
     in property <string> account-info;
     // "1a2b••••••••9f0e", and whether Spotify rejected it ("invalid client").
     in property <string> client-id-masked;
@@ -162,7 +161,7 @@ export component SettingsPage inherits PageFade {
                 }
                 Row {
                     label: "Shuffle style";
-                    hint: "Fewer repeats spreads an artist's songs apart and avoids recently played ones.";
+                    hint: "Fewer repeats spreads an artist's songs apart.";
                     Chip { y: (parent.height - self.height) / 2; text: "Random"; selected: Settings.shuffle-style == "random"; clicked => { Settings.shuffle-style = "random"; Settings.changed("shuffle-style"); } }
                     Chip { y: (parent.height - self.height) / 2; text: "Fewer repeats"; selected: Settings.shuffle-style == "fewer"; clicked => { Settings.shuffle-style = "fewer"; Settings.changed("shuffle-style"); } }
                 }
@@ -292,13 +291,7 @@ export component SettingsPage inherits PageFade {
             }
 
             Group {
-                title: "Privacy";
-                Switch {
-                    label: "Private session";
-                    hint: "Stops recording plays in Cadence's local listening stats. It can't hide your activity from Spotify.";
-                    key: "private-session";
-                    on <=> Settings.private-session;
-                }
+                title: "Language";
                 Row { label: "Language"; hint: "Cadence is available in English only."; Label { text: "English"; vertical-alignment: center; } }
             }
 

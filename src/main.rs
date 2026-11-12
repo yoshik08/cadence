@@ -29,7 +29,6 @@ mod settings;
 mod setup;
 mod sleep;
 mod smtc;
-mod stats;
 mod taskbar;
 mod thumbbar;
 mod update;
@@ -646,8 +645,8 @@ fn load_now_art(ui: &MainWindow, rt: tokio::runtime::Handle, seq: u64, url: Stri
     });
 }
 
-/// After a track change on the UI thread: notifications, panel, podcasts, sleep timer, stats.
-fn after_track(ui: &MainWindow, uri: &str, title: &str, artist: &str, album: &str, duration_ms: u32, explicit: bool, art_url: Option<String>) {
+/// After a track change on the UI thread: notifications, panel, podcasts, sleep timer.
+fn after_track(ui: &MainWindow, uri: &str, title: &str, artist: &str, duration_ms: u32, explicit: bool, art_url: Option<String>) {
     if explicit && prefs::bool_or("explicit_filter", false) {
         logln!("explicit filter: skipping {uri}");
         menu::toast_text(ui, "Skipped an explicit track (Settings > Filter explicit content)");
@@ -656,7 +655,6 @@ fn after_track(ui: &MainWindow, uri: &str, title: &str, artist: &str, album: &st
     }
     podcast::on_track(ui, uri, duration_ms);
     sleep::on_track(ui, uri);
-    stats::on_track(uri, title, artist, album, duration_ms);
     if prefs::bool_or("panel_on_play", false) && !ui.global::<Playback>().get_queue_open() {
         ui.global::<Playback>().set_side_open(true);
     }
@@ -835,7 +833,7 @@ async fn stream(ui: &slint::Weak<MainWindow>, rt: tokio::runtime::Handle) -> Res
                 let _ = ui.upgrade_in_event_loop(move |ui| {
                     apply_track(&ui, rt, seq, uri.clone(), t.clone(), a.clone(), album.clone(), u.clone(), duration_ms);
                     set_links(&ui, seq, &uri, artists, None);
-                    after_track(&ui, &uri, &t, &a, &album, duration_ms, explicit, u);
+                    after_track(&ui, &uri, &t, &a, duration_ms, explicit, u);
                 });
             }
             Event::Playing { position_ms } | Event::Paused { position_ms } => {
@@ -844,7 +842,6 @@ async fn stream(ui: &slint::Weak<MainWindow>, rt: tokio::runtime::Handle) -> Res
                 if !now_playing {
                     queue::save();
                 }
-                stats::on_playing(now_playing);
                 podcast::on_position(position_ms);
                 if now_playing != playing {
                     playing = now_playing;
@@ -864,7 +861,6 @@ async fn stream(ui: &slint::Weak<MainWindow>, rt: tokio::runtime::Handle) -> Res
                 playing = false;
                 LOCAL_ACTIVE.store(false, Ordering::Relaxed);
                 queue::save();
-                stats::on_playing(false);
                 let _ = ui.upgrade_in_event_loop(|ui| {
                     ui.global::<Playback>().set_playing(false);
                     podcast::set_saving(&ui, false);
@@ -1158,6 +1154,10 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         return Ok(());
     }
+    // Listening stats and the Cadence profile were removed in 1.5: delete what older versions
+    // stored (the plays table is dropped by db.rs).
+    let _ = std::fs::remove_file(auth::data_dir().join("profile.png"));
+    prefs::remove(&["profile", "private_session"]);
     art::mark_ui_thread();
     taskbar::register_app_id();
     mem::start_logger();
@@ -1489,7 +1489,6 @@ fn main() -> Result<(), slint::PlatformError> {
     slint::run_event_loop_until_quit()?;
     let _ = ui.hide();
     winint::remove_tray();
-    stats::flush();
 
     // Remember where playback stopped, then disconnect the Connect device (waits at most 2 s).
     if is_local_active() {

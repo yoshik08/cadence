@@ -70,7 +70,6 @@ pub fn refresh(ui: &MainWindow) {
     st.set_gpu(prefs::bool_or("gpu", true));
     st.set_show_local(prefs::bool_or("show_local", false));
     st.set_local_folders(ModelRc::new(VecModel::from(crate::local::folders().into_iter().map(SharedString::from).collect::<Vec<_>>())));
-    st.set_private_session(prefs::bool_or("private_session", false));
     st.set_debug_log(prefs::bool_or("debug_log", false));
     st.set_version(env!("CARGO_PKG_VERSION").into());
     st.set_client_id_masked(crate::auth::read_client_id(&crate::auth::data_dir()).map(|id| crate::auth::mask_client_id(&id)).unwrap_or_default().into());
@@ -204,7 +203,6 @@ fn changed(ui: &MainWindow, key: &str) {
             ui.global::<Browse>().set_show_local(st.get_show_local());
             crate::browse::reload_sidebar(ui);
         }
-        "private-session" => prefs::set("private_session", json!(st.get_private_session())),
         "debug-log" => prefs::set("debug_log", json!(st.get_debug_log())),
         _ => {}
     }
@@ -222,7 +220,7 @@ fn action(ui: &MainWindow, a: &str) {
         "zoom-in" | "zoom-out" | "zoom-reset" => zoom(ui, a),
         "cache-open" => crate::winint::shell_open(&crate::cache::dir("audio").display().to_string()),
         "cache-clear" => {
-            crate::dialogs::confirm(ui, "Clear the cache?", "Deletes downloaded audio, cover art, lyrics and cached library pages. Your settings, sign-in and listening stats stay.", "Clear", true, |ui| {
+            crate::dialogs::confirm(ui, "Clear the cache?", "Deletes downloaded audio, cover art, lyrics and cached library pages. Your settings and sign-in stay.", "Clear", true, |ui| {
                 for sub in ["audio", "art", "lyrics", "api"] {
                     let d = crate::cache::dir(sub);
                     if let Ok(rd) = std::fs::read_dir(&d) {
