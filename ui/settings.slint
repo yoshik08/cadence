@@ -50,6 +50,16 @@ export global Settings {
     in property <string> memory;
     in-out property <bool> debug-log;
     in property <bool> restart-needed;
+    // Updates
+    in property <string> version;
+    in property <string> update-status: "Checking happens once per launch.";
+    in property <bool> update-available;
+    // 0..1 while downloading, -1 otherwise.
+    in property <float> update-progress: -1;
+    in property <bool> update-busy;
+    in property <bool> update-staged;
+    // The program folder can be written; otherwise only "Open release page".
+    in property <bool> update-installable: true;
     in property <string> note;
 
     callback changed(string /* key */);
@@ -315,6 +325,41 @@ export component SettingsPage inherits PageFade {
                     label: "Apps connected to your Spotify account";
                     Button { y: (parent.height - self.height) / 2; size: Tokens.control-sm; text: "spotify.com/account/apps"; clicked => { Settings.action("account-apps"); } }
                 }
+            }
+
+            Group {
+                title: "Updates";
+                Row {
+                    label: "Cadence " + Settings.version;
+                    hint: Settings.update-status;
+                    if Settings.update-available && Settings.update-installable : Button {
+                        y: (parent.height - self.height) / 2; size: Tokens.control-sm; kind: "primary";
+                        text: "Update now"; enabled: !Settings.update-busy;
+                        clicked => { Settings.action("update-now"); }
+                    }
+                    if Settings.update-available && Settings.update-installable && !Settings.update-staged : Button {
+                        y: (parent.height - self.height) / 2; size: Tokens.control-sm;
+                        text: "Update on next restart"; enabled: !Settings.update-busy;
+                        clicked => { Settings.action("update-later"); }
+                    }
+                    if Settings.update-available && !Settings.update-installable : Button {
+                        y: (parent.height - self.height) / 2; size: Tokens.control-sm;
+                        text: "Open release page";
+                        clicked => { Settings.action("update-page"); }
+                    }
+                }
+                if Settings.update-progress >= 0 : Rectangle {
+                    height: Tokens.space-xs;
+                    border-radius: Tokens.radius-full;
+                    background: Tokens.bg-track;
+                    Rectangle {
+                        x: 0px;
+                        width: parent.width * Math.clamp(Settings.update-progress, 0, 1);
+                        border-radius: Tokens.radius-full;
+                        background: Tokens.accent;
+                    }
+                }
+                Caption { text: "Updates replace only the program. Your Client ID, sign-in and settings stay."; wrap: word-wrap; color: Tokens.text-tertiary; }
             }
 
             Group {

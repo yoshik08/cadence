@@ -34,6 +34,8 @@ export struct StatRow {
 export global Browse {
     // Navigation. `page`: home | search | library | list | artist | stats | profile | settings.
     in-out property <string> page: "home";
+    // A newer Cadence is available: the Settings button gets a dot.
+    in property <bool> update-available;
     in property <bool> flip;
     in property <bool> loading;
     in property <string> error;
@@ -390,7 +392,7 @@ export component Sidebar inherits Rectangle {
             alignment: start;
             IconButton { round: true; icon: Icons.chart; clicked => { Browse.go("stats"); } }
             IconButton { round: true; icon: Icons.user; clicked => { Browse.go("profile"); } }
-            IconButton { round: true; icon: Icons.gear; clicked => { Browse.go("settings"); } }
+            IconButton { round: true; icon: Icons.gear; active: Browse.update-available; clicked => { Browse.go("settings"); } }
         }
     }
 }

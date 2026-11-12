@@ -967,7 +967,7 @@ fn go_home(ui: &MainWindow) {
     if signed_out() {
         finish(&b);
         b.set_skeleton(false);
-        b.set_status("Add your Spotify client ID and sign in to load your library (see README).".into());
+        b.set_status("Sign in to Spotify to load your library. Cadence asks when it starts.".into());
         load_home_local(g);
         return;
     }

@@ -72,6 +72,7 @@ pub fn refresh(ui: &MainWindow) {
     st.set_local_folders(ModelRc::new(VecModel::from(crate::local::folders().into_iter().map(SharedString::from).collect::<Vec<_>>())));
     st.set_private_session(prefs::bool_or("private_session", false));
     st.set_debug_log(prefs::bool_or("debug_log", false));
+    st.set_version(env!("CARGO_PKG_VERSION").into());
     st.set_client_id_masked(crate::auth::read_client_id(&crate::auth::data_dir()).map(|id| crate::auth::mask_client_id(&id)).unwrap_or_default().into());
     refresh_devices(ui);
     refresh_info(ui);
@@ -98,7 +99,7 @@ fn refresh_info(ui: &MainWindow) {
     let w = ui.as_weak();
     crate::runtime().spawn(async move {
         let info = match crate::web() {
-            None => "Not signed in. Add your client ID (see README) and restart.".to_string(),
+            None => "Not signed in yet. Cadence signs in to Spotify when it starts.".to_string(),
             Some(web) => match web.days_left().await {
                 Some(d) if d <= 0 => "Your sign-in has expired; Re-authorize to continue.".to_string(),
                 Some(d) => format!("Signed in. Spotify asks you to sign in again in about {d} days (6 months after you first authorized)."),
@@ -235,6 +236,9 @@ fn action(ui: &MainWindow, a: &str) {
             });
         }
         "log-open" => crate::winint::shell_open(&crate::cache::dir("..").display().to_string()),
+        "update-now" => crate::updates_ui::start(ui, true),
+        "update-later" => crate::updates_ui::start(ui, false),
+        "update-page" => crate::updates_ui::open_page(),
         "change-client-id" => crate::setup::open_change(ui),
         "sign-out" => {
             crate::dialogs::confirm(ui, "Sign out of Spotify?", "Cadence removes its Spotify sign-in from this PC and quits. Your Client ID and settings stay; the next start asks you to approve again.", "Sign out", true, |_| {
@@ -246,7 +250,7 @@ fn action(ui: &MainWindow, a: &str) {
         "account-apps" => crate::winint::shell_open("https://www.spotify.com/account/apps/"),
         "reauth" => {
             let Some(web) = crate::web() else {
-                return st.set_note("Add your Spotify client ID first (see README), then restart Cadence.".into());
+                return st.set_note("Not signed in yet: restart Cadence to sign in, or use Change Client ID.".into());
             };
             st.set_note("Sign in to Spotify in your browser…".into());
             let w = ui.as_weak();

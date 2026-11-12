@@ -32,6 +32,8 @@ mod smtc;
 mod stats;
 mod taskbar;
 mod thumbbar;
+mod update;
+mod updates_ui;
 mod web;
 mod winint;
 
@@ -1148,6 +1150,14 @@ use slint::Model;
 
 fn main() -> Result<(), slint::PlatformError> {
     let _ = START.set(std::time::Instant::now());
+    // A staged update is applied before anything else starts (update.rs). Only the program
+    // file is swapped; the data folder is left alone.
+    if let Ok(exe) = std::env::current_exe()
+        && update::on_start(&exe, &update::update_dir(&auth::data_dir())) == update::Start::Restart
+        && update::relaunch(&exe).is_ok()
+    {
+        return Ok(());
+    }
     art::mark_ui_thread();
     taskbar::register_app_id();
     mem::start_logger();
@@ -1430,6 +1440,11 @@ fn main() -> Result<(), slint::PlatformError> {
         demo(&ui, &rt);
     } else if offline {
         browse::init(&ui);
+        // Debug test runs: the update check against a local fake endpoint.
+        #[cfg(debug_assertions)]
+        if std::env::var("CADENCE_UPDATE_URL").is_ok() {
+            updates_ui::check_once(ui.as_weak());
+        }
         // Tests: CADENCE_ROUTES="ms:route,..." navigates; CADENCE_SHOTS snapshots.
         for spec in std::env::var("CADENCE_ROUTES").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
             let Some((ms, route)) = spec.split_once(':') else { continue };
@@ -1443,6 +1458,7 @@ fn main() -> Result<(), slint::PlatformError> {
         WEB_PENDING.store(auth::client_id().is_some(), Ordering::Relaxed);
         browse::init(&ui);
         rt.spawn(startup(ui.as_weak()));
+        updates_ui::check_once(ui.as_weak());
         // Test runs only: CADENCE_SHOTS with the real library (inactive window, nothing played).
         if flag("CADENCE_INACTIVE") {
             for spec in std::env::var("CADENCE_ROUTES").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
