@@ -1,26 +1,26 @@
 <p align="center"><img src="assets/icon-128.png" width="96" height="96" alt="Cadence icon"></p>
 
-# Cadence — Lightweight Spotify Client for Windows (Pure Rust)
+# Cadence â€” Lightweight Spotify Client for Windows (Pure Rust)
 
 [![Release](https://img.shields.io/github/v/release/yoshik08/cadence)](https://github.com/yoshik08/cadence/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](https://github.com/yoshik08/cadence/releases)
 [![Made with Rust](https://img.shields.io/badge/Made%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
-**Cadence is a lightweight Spotify desktop client for Windows, written entirely in Rust.** No Electron, no Chromium, no webview — just a native Slint UI rendered with OpenGL, streaming through [librespot](https://github.com/librespot-org/librespot), and library browsing through the Spotify Web API (a small built-in client).
+**Cadence is a lightweight Spotify desktop client for Windows, written entirely in Rust.** No Electron, no Chromium, no webview â€” just a native Slint UI rendered with OpenGL, streaming through [librespot](https://github.com/librespot-org/librespot), and library browsing through the Spotify Web API (a small built-in client).
 
-It plays your Spotify library at 320 kbps with gapless playback and loudness normalisation, acts as a Spotify Connect device, and stays around **25 MB of RAM while playing** — roughly 10× lighter than the official Spotify desktop app.
+It plays your Spotify library at 320 kbps with gapless playback and loudness normalisation, acts as a Spotify Connect device, and stays around **25 MB of RAM while playing** â€” roughly 10Ã— lighter than the official Spotify desktop app.
 
 ## Download
 
-Grab `cadence.exe` from the [latest release](https://github.com/yoshik08/cadence/releases) (~12 MB, no installer, no dependencies). Windows 10 or 11, Spotify Premium required.
+Grab `cadence.exe` from the [latest release](https://github.com/yoshik08/cadence/releases) (~22 MB, no installer, no dependencies). Later versions install from Settings > Updates. Windows 10 or 11, Spotify Premium required.
 
 ## Why Cadence
 
 |  | Cadence | Official Spotify app |
 | --- | --- | --- |
-| RAM while playing | ~55–70 MB | ~300–500 MB |
-| Download size | ~12 MB | ~100 MB+ |
+| RAM while playing | ~55â€“70 MB | ~300â€“500 MB |
+| Download size | ~22 MB | ~100 MB+ |
 | UI stack | Native Slint (OpenGL, vsync) | Electron / Chromium |
 | Startup | Under 1 s | Several seconds |
 | Playback | 320 kbps, gapless, normalisation | 320 kbps |
@@ -55,7 +55,7 @@ Grab `cadence.exe` from the [latest release](https://github.com/yoshik08/cadence
 
 **Lyrics**
 - Lyrics page in the yoshik.xyz design with word-synced lines, plus a Now Playing side panel with synced lyrics
-- Per-song lyrics timing offset (±0.1 s steps), saved per track
+- Per-song lyrics timing offset (Â±0.1 s steps), saved per track
 
 **Yours, on this PC**
 - Listening stats (top songs, artists, albums, listening time) counted from Cadence's own plays; private session pauses recording
@@ -64,35 +64,52 @@ Grab `cadence.exe` from the [latest release](https://github.com/yoshik08/cadence
 ## Requirements
 
 - Windows 10 or 11
-- Rust stable (edition 2024, so a recent toolchain) — only if building from source
-- Visual Studio 2022 Build Tools with the "Desktop development with C++" workload — only if building from source
+- Rust stable (edition 2024, so a recent toolchain) â€” only if building from source
+- Visual Studio 2022 Build Tools with the "Desktop development with C++" workload â€” only if building from source
 - Spotify Premium (librespot only streams for Premium accounts, and the app owner needs it too, see Limits)
 
 No OpenSSL, cmake or NASM is needed: TLS is the Windows native stack (schannel).
 
 ## Spotify developer app
 
-Cadence uses your own Spotify app for the Web API (PKCE, no client secret).
+Cadence uses your own Spotify app for your library (PKCE, no client secret). The first time you start Cadence it shows a setup card that walks you through it:
 
-1. Open [https://developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) and log in.
-2. Create app. Pick any name and description.
-3. Under "Which API/SDKs are you planning to use?" select Web API.
-4. Add the redirect URI exactly as `http://127.0.0.1:8888/callback` and save.
-5. Open the app's settings and copy the Client ID.
-6. Give it to Cadence in one of two ways:
-   - set the `SPOTIFY_CLIENT_ID` environment variable, or
-   - put it on the first line of `%APPDATA%\cadence\client_id.txt`.
+How to get your Client ID (takes about 2 minutes). Your Spotify account needs Premium to create an app.
 
-Anyone else who should use the app has to be added under User Management in the dashboard (see Limits).
+1. Click Open Spotify Dashboard and log in.
+2. Click Create app (top right).
+3. App name: anything, for example Cadence.
+4. App description: anything, for example My music player. Required.
+5. Website: leave blank.
+6. Redirect URIs: click Copy below, paste it in the field, then click the Add button next to the field. It must show in the list before you save. After saving, check it still reads 127.0.0.1 and not localhost.
+   Redirect URI: `http://127.0.0.1:8888/callback`
+7. Under Which API/SDKs are you planning to use, tick Web API.
+8. Tick the box agreeing to Spotify's Developer Terms of Service and Design Guidelines, then click Save.
+9. Open your new app, go to Settings, and copy the Client ID.
+10. Paste it above and click Continue.
+
+Cadence opens your browser twice, once for your library and once for streaming. Approve both. Each is one-time.
+
+Anyone else who should use the app has to be added under User Management in the dashboard (see Limits). To use a different app later, Settings > Account > Change Client ID; your current sign-in stays until the new one succeeds.
 
 ## First launch
 
-Cadence opens your browser twice, once each for:
+After you paste your Client ID and click Continue, Cadence opens your browser twice:
 
-1. the Web API (your library, playlists, search), using your client ID, and
-2. streaming, using librespot's own sign-in. Spotify treats streaming as a separate grant, so this is a second approval.
+1. Step 1 of 2: your library, playlists and search (the Web API), using your Client ID.
+2. Step 2 of 2: streaming, using librespot's own sign-in. Spotify treats streaming as a separate grant, so this is a second approval.
 
-Both are one-time. Spotify ends the Web API sign-in 6 months after you first approve it; Cadence warns two weeks ahead and Settings > Re-authorize renews it. Updating from 1.3 asks for the Web API approval once more: Cadence now requests every permission it uses in that one step. The results are cached in `%APPDATA%\cadence`: `web_token.json` and `librespot\credentials.json`. To sign out, close Cadence and delete those two files. If the client ID is missing, the library stays empty and the page says so; streaming still works, for example from another Spotify app through Connect.
+Both are one-time. Spotify ends the Web API sign-in 6 months after you first approve it; Cadence warns two weeks ahead and Settings > Re-authorize renews it, keeping your Client ID.
+
+## Updating
+
+Settings > Updates shows your version and, when a newer release exists, Update now (downloads, installs and restarts) or Update on next restart. Cadence checks once per launch and never downloads anything until you click. Updates replace only the program file: your Client ID, both sign-ins, settings and caches are kept, so you never sign in again because of an update. Replacing `cadence.exe` by hand keeps them too.
+
+Updating from 1.4 asks for nothing: 1.5 uses the same permissions. (Updating from 1.3 or older asks for the library approval once, because 1.4 added permissions.)
+
+## Signing out
+
+Settings > Account > Sign out removes Cadence's two sign-ins from this PC and quits; the next start asks you to approve again. Your Client ID and settings stay.
 
 ## Build and run
 
@@ -107,15 +124,15 @@ For development, `cargo build --features smoke` adds a PNG snapshot writer. Two 
 
 - `CADENCE_SMOKE=1` opens an inactive window, writes a snapshot to `CADENCE_SNAPSHOT` (default `smoke.png`) after about 1.5 s, and exits.
 - `CADENCE_OFFLINE=1` opens an inactive window and keeps running until closed, for measuring idle memory.
-- `CADENCE_MEM=1` logs the working set every 5 s to `%LOCALAPPDATA%\cadence\cadence.log`.
+- `CADENCE_MEM=1` logs the working set every 5 s to `cadence.log` (Settings > Open log folder).
 - `CADENCE_RODIO=1` uses librespot's own audio output instead of Cadence's (it doesn't follow device changes).
 - `CADENCE_DEMO=1` shows the lyrics page for one track with a simulated clock and no Spotify session; `scripts/demo.sh` drives it and writes snapshots.
 
-Karaoke mode (Apple Music syllable timings) is a personal-build feature: `cargo build --release --features karaoke` with an Apple Music media-user-token in `APPLE_MEDIA_USER_TOKEN` or `%APPDATA%\cadence\apple_media_token.txt`. Release builds leave it out.
+Karaoke mode (Apple Music syllable timings) is a personal-build feature: `cargo build --release --features karaoke` with an Apple Music media-user-token (see `src/apple.rs`). Release builds leave it out.
 
 Two librespot crates are vendored with small, marked patches (`vendor/*/CADENCE_PATCH.md`): queue editing for the local client, and local files at any sample rate in more formats.
 
-Your library index, listening stats, search history, local files and podcast progress live in `%APPDATA%\cadence\cadence.db` (SQLite). Caches live in `%LOCALAPPDATA%\cadence\cache` (`audio`, `art`, `lyrics`, `api`), each size-capped and pruned oldest-first at startup.
+Your library index, listening stats, search history, local files and podcast progress live in a local SQLite database next to your settings. Caches (`audio`, `art`, `lyrics`, `api`) are each size-capped and pruned oldest-first at startup; Settings > Storage shows and clears them.
 
 ## Memory
 
@@ -129,7 +146,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\measure.ps1 -Minutes
 
 It attaches to the running app. In Task Manager, read the "Memory (active private working set)" column, not "Working set".
 
-Playback, release build, 10 min with the library open and a playlist playing (9 tracks, 100% DPI, 1200×780 window, measured with scripts\measure.ps1 on 2026-11-08): private working set min 17.4 MB, avg 25.2 MB, max 28.1 MB, final 23.3 MB; peak commit 31.5 MB; peak 21 threads. Flat over time, no growth across track changes.
+Playback, release build, 10 min with the library open and a playlist playing (9 tracks, 100% DPI, 1200Ã—780 window, measured with scripts\measure.ps1 on 2026-11-08): private working set min 17.4 MB, avg 25.2 MB, max 28.1 MB, final 23.3 MB; peak commit 31.5 MB; peak 21 threads. Flat over time, no growth across track changes.
 
 ## Limits
 
@@ -144,3 +161,4 @@ librespot is an unofficial client library. Using it is against Spotify's Terms o
 ---
 
 Icon by [Icons8](https://icons8.com).
+
